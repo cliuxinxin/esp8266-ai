@@ -80,7 +80,7 @@ On macOS, right-click the menu bar icon and choose **“自动显示设置…”
 | Scheduled | Stocks | No | 15 min | 10 s |
 | Scheduled | Network speed | No | 10 min | 10 s |
 
-Scheduled intervals accept 1–240 minutes and durations accept 5–60 seconds. AUTO priority is **approval required > Codex working > Claude working > music > due scheduled content > idle pet**. If several scheduled items are due, the least recently shown one wins. An event interrupts scheduled content; when the event ends, that content resumes with a fresh full duration.
+Scheduled intervals accept 1–240 minutes and durations accept 5–60 seconds. AUTO priority is **approval required > active Claude/Codex agents > music > due scheduled content > idle pet**. When both Claude and Codex are working and enabled, the display alternates between them every 2 seconds. If several scheduled items are due, the least recently shown one wins. An event interrupts scheduled content; when the event ends, that content resumes with a fresh full duration.
 
 Disabling an item affects **AUTO mode only**. You can still choose any page manually from the Display menu or mirror controls. Choose **Display → 名人名言 (Daily Quote)** to keep the quote page fixed; **换一句 (Next Quote)** requests a new quote immediately and refreshes the device when quote mode is already fixed.
 

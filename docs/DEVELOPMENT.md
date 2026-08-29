@@ -291,7 +291,7 @@ Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只�
 }
 ```
 
-`revision` 必须是 JSON 整数，Mac 从已保存值递增，固件不对其数值范围做截断；`interval_seconds` 的有效范围是 60–14,400 秒（UI 为 1–240 分钟），`duration_seconds` 为 5–60 秒，Mac 保存和固件接收时都会把后两者截断到范围内。事件优先级固定为：等待确认、Codex 工作、Claude 工作、音乐。没有事件时，固件从已到期且数据有效的定时项中选择最久未显示的一项；事件打断定时页后保留该页，事件结束时重新开始一段完整显示时长。关闭开关只影响 `auto` 模式，手动固定模式始终绕过调度器。
+`revision` 必须是 JSON 整数，Mac 从已保存值递增，固件不对其数值范围做截断；`interval_seconds` 的有效范围是 60–14,400 秒（UI 为 1–240 分钟），`duration_seconds` 为 5–60 秒，Mac 保存和固件接收时都会把后两者截断到范围内。事件优先级固定为：等待确认、正在工作的 Claude / Codex、音乐；Claude 和 Codex 同时工作且都已启用时沿用桌宠选择逻辑，每 2 秒轮换，并不存在两者之间的固定高低顺序。没有事件时，固件从已到期且数据有效的定时项中选择最久未显示的一项；事件打断定时页后保留该页，事件结束时重新开始一段完整显示时长。关闭开关只影响 `auto` 模式，手动固定模式始终绕过调度器。
 
 兼容行为：旧 bridge 不带 `auto_display` 时，新固件保留当前配置（首次启动即使用上述编译默认值）；新 revision 中缺失或类型错误的字段使用编译默认值，合法字段正常应用，revision 不变则不重置调度。名言或其他定时页数据无效时不会被 AUTO 选择。旧固件会忽略新 bridge 增加的 JSON 字段和未知串口帧，原有状态页仍可用，但要使用 `quote` 模式和可配置调度必须升级到 v0.4.13 固件。
 
@@ -300,7 +300,7 @@ Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只�
 `QuoteMonitor` 每 30 分钟刷新一次，中文源为 `https://v1.hitokoto.cn/`，英文源为 `https://zenquotes.io/`；两种语言交替优先并互为失败回退，拒绝空内容、过长内容和最近 20 条重复。最近一次成功结果缓存到 `~/Library/Application Support/AIClockBridge/quote-cache.json`，请求失败时继续使用；30 分钟后 JSON 的 `stale` 变为 `true`。
 
 - `GET /quote`：`text`、`author`、`language`（`zh|en`）、Unix 秒 `updated_at`、`text_rev`、`stale`；尚无可用名言时返回 `{"available":false}`。
-- `GET /quote/text.raw`：一张 240×240 RGB565 大端整屏位图，无头部，恰好 115,200 字节；设备按 480 字节一行流式绘制。
+- `GET /quote/text.raw`：已有可用名言时成功响应一张 240×240 RGB565 大端整屏位图，无头部，恰好 115,200 字节，设备按 480 字节一行流式绘制；尚未获取到任何名言时返回 404。
 - 固定名言模式：`POST /api/display mode=quote`。若 JSON 或整屏位图不可用，固件保留配置的 `quote` 模式但临时显示桌宠，直到内容可取。
 - 串口协议（每帧以换行结束）：bridge → device 支持 `#HELLO`、`#STATUS {json}`、`#NET {json}`、`#STOCK {json}`、`#QUOTE {json}`、`#CMD {json}`；device → bridge 为 `#DEVICE {"name":"aiclock","fw":"x.y.z"}`。`#QUOTE` 只同步元数据，整屏位图仍从 `/quote/text.raw` 获取，因此纯串口且无 WiFi 时不会进入名言页。
 
