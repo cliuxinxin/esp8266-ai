@@ -1,13 +1,22 @@
 #pragma once
 
 // ---- Firmware version (shown on the first-time WiFi setup screen & /api/info) ----
-#define FW_VERSION "0.4.11"
+#define FW_VERSION "0.4.12"
 
 // ---- Bridge polling ----
 #define BRIDGE_DEFAULT_PORT 8765
 #define BRIDGE_DEFAULT_PATH "/status"
 #define BRIDGE_POLL_INTERVAL_MS 5000
 #define BRIDGE_HTTP_TIMEOUT_MS 3000
+
+// ---- Weather ----
+#define WEATHER_POLL_INTERVAL_MS 600000UL
+#define WEATHER_STALE_MS 1800000UL
+#define WEATHER_AUTO_INTERVAL_MS 900000UL
+#define WEATHER_AUTO_DURATION_MS 10000UL
+#define WEATHER_TEXT_W 232
+#define WEATHER_TEXT_H 16
+#define WEATHER_TEXT_COUNT 7
 
 // ---- WiFiManager ----
 #define WIFI_PORTAL_AP_NAME "AI-Clock-Setup"

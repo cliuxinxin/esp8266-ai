@@ -197,7 +197,7 @@ pio device monitor -b 115200
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music` 切换屏幕显示（net=网速曲线页，music=音乐播放页）|
+| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music\|stock\|weather` 切换屏幕显示 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
@@ -246,7 +246,24 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 设备每 2 秒刷新一次音乐信息；封面只有在版本号变化时重新拉取。Mac 弹窗镜像同样显示
 音乐页，方便不用看设备也能确认布局。
 
-## 7. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
+## 7. 增强天气页（Mac + 设备同步显示）
+
+Mac 的 `WeatherMonitor` 每 10 分钟从 Open-Meteo 获取天气预报和美国 AQI，默认城市为成都；
+右键菜单「设置天气城市…」通过地理编码搜索并保存经纬度。公网请求、缓存和中文渲染都在
+Mac 完成，ESP8266 不直接访问公网天气 API。
+
+- `GET /weather`：当前温度、体感温度、最高/最低温、湿度、降水概率、风速、AQI 和未来三天。
+- `GET /weather/text.raw`：`[1B 条数][7 × 232 × 16 RGB565 大端像素]`，依次是城市、天气、
+  风向、AQI 等级和三个预报日标签；设备只在 `text_rev` 变化时重新获取。
+- 数据超过 30 分钟显示陈旧标记；请求失败继续使用最后一次成功缓存，缺失数值显示 `--`。
+- AUTO 模式每 15 分钟显示天气 10 秒，优先级为：审批提醒、AI 工作、音乐、天气、空闲桌宠。
+- 手动选择天气模式时持续显示，设备接口使用 `POST /api/display mode=weather`。
+
+天气页复用全局行缓冲逐行读取中文文字条，不保存整屏位图；天气图标由固件用少色像素图形绘制。
+固件 v0.4.12 的 PlatformIO 构建结果：RAM 44,560 / 81,920（54.4%），Flash
+843,239 / 1,044,464（80.7%）。
+
+## 8. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
 
 除了日志 mtime 轮询（保留为兜底），bridge 还接收两个 CLI 官方 hooks 的事件推送，
 状态切换从"最多迟滞 20 秒"变成"毫秒级"：

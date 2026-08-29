@@ -17,6 +17,7 @@
 #include <AnimatedGIF.h>
 
 #include "config.h"
+#include "weather_logic.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
 #include "img/claude_logo.h"
@@ -73,7 +74,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_WEATHER };
 DisplayMode displayMode = MODE_AUTO;
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
@@ -135,6 +136,39 @@ bool stockChromeDrawn = false;
 String stockLastCode[MAX_STOCKS]; // top line (code + CJK name strip)
 String stockLastVal[MAX_STOCKS];  // value line (price + pct)
 unsigned long lastStockPollMs = 0;
+
+// ---------- weather mode state ----------
+const int WEATHER_MISSING = -32768;
+struct WeatherDay {
+  String label;
+  int code = -1;
+  int high = WEATHER_MISSING;
+  int low = WEATHER_MISSING;
+};
+struct WeatherState {
+  bool valid = false;
+  bool stale = false;
+  String city;
+  int code = -1;
+  int temperature = WEATHER_MISSING;
+  int apparent = WEATHER_MISSING;
+  int high = WEATHER_MISSING;
+  int low = WEATHER_MISSING;
+  int humidity = WEATHER_MISSING;
+  int rain = WEATHER_MISSING;
+  int windSpeed = WEATHER_MISSING;
+  int aqi = WEATHER_MISSING;
+  int textRev = -1;
+  WeatherDay forecast[3];
+  int forecastCount = 0;
+};
+WeatherState weather;
+unsigned long lastWeatherPollMs = 0;
+unsigned long weatherAutoDueMs = 0;
+unsigned long weatherAutoUntilMs = 0;
+bool weatherChromeDrawn = false;
+bool weatherDirty = false;
+int weatherTextDrawnRev = -1;
 // CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
 // 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
 const int STOCK_NAME_W = 156, STOCK_NAME_H = 16;
@@ -1445,6 +1479,143 @@ void drawStockScreen() {
   }
 }
 
+// ---------- weather screen ----------
+
+int weatherInt(JsonVariant value) {
+  return value.isNull() ? WEATHER_MISSING : (int)lround(value.as<float>());
+}
+
+String weatherValue(int value, const char *suffix = "") {
+  return value == WEATHER_MISSING ? "--" : String(value) + suffix;
+}
+
+bool handleWeatherPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload) || (doc["available"].is<bool>() && !doc["available"].as<bool>())) return false;
+  if (!doc["city"].is<const char *>() || !doc["weather_code"].is<int>() || !doc["updated_at"].is<long>()) return false;
+  WeatherState next;
+  next.valid = true;
+  next.stale = doc["stale"] | false;
+  next.city = doc["city"].as<String>();
+  next.code = doc["weather_code"].as<int>();
+  next.temperature = weatherInt(doc["temperature"]);
+  next.apparent = weatherInt(doc["apparent_temperature"]);
+  next.high = weatherInt(doc["high"]);
+  next.low = weatherInt(doc["low"]);
+  next.humidity = weatherInt(doc["humidity"]);
+  next.rain = weatherInt(doc["precipitation_probability"]);
+  next.windSpeed = weatherInt(doc["wind_speed"]);
+  next.aqi = weatherInt(doc["aqi"]);
+  next.textRev = doc["text_rev"] | -1;
+  JsonArray days = doc["forecast"];
+  for (JsonObject day : days) {
+    if (next.forecastCount >= 3) break;
+    WeatherDay &target = next.forecast[next.forecastCount++];
+    target.label = day["day"] | "--";
+    target.code = day["code"] | -1;
+    target.high = weatherInt(day["high"]);
+    target.low = weatherInt(day["low"]);
+  }
+  weather = next;
+  weatherDirty = true;
+  if (weatherAutoDueMs == 0) weatherAutoDueMs = millis() + WEATHER_AUTO_INTERVAL_MS;
+  return true;
+}
+
+void drawWeatherIcon(int x, int y, int code, int size) {
+  WeatherIconKind kind = weatherIconForCode(code);
+  uint16_t sun = 0xFFE0, cloud = 0xC618, rain = 0x4D7F;
+  if (kind == WEATHER_CLEAR || kind == WEATHER_PARTLY_CLOUDY) {
+    tft.fillCircle(x + size / 2, y + size / 2, size / 4, sun);
+  }
+  if (kind != WEATHER_CLEAR) {
+    tft.fillCircle(x + size / 3, y + size / 2, size / 5, cloud);
+    tft.fillCircle(x + size / 2, y + size / 2 - 3, size / 4, cloud);
+    tft.fillRect(x + size / 5, y + size / 2, size * 3 / 5, size / 4, cloud);
+  }
+  if (kind == WEATHER_RAIN || kind == WEATHER_SHOWERS || kind == WEATHER_THUNDERSTORM) {
+    for (int i = 0; i < 3; i++) tft.drawLine(x + 8 + i * 8, y + size * 3 / 4, x + 5 + i * 8, y + size - 1, rain);
+  } else if (kind == WEATHER_SNOW) {
+    for (int i = 0; i < 3; i++) tft.fillCircle(x + 7 + i * 9, y + size - 5, 2, TFT_WHITE);
+  }
+}
+
+bool drawWeatherText() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0 || weather.textRev < 0) return false;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, "http://" + bridgeHost + "/weather/text.raw")) return false;
+  if (http.GET() != HTTP_CODE_OK || http.getSize() != 1 + WEATHER_TEXT_COUNT * WEATHER_TEXT_W * WEATHER_TEXT_H * 2) {
+    http.end();
+    return false;
+  }
+  WiFiClient *stream = http.getStreamPtr();
+  uint8_t count = 0;
+  if (stream->readBytes(&count, 1) != 1 || count != WEATHER_TEXT_COUNT) { http.end(); return false; }
+  const int xs[WEATHER_TEXT_COUNT] = {4, 4, 116, 174, 8, 88, 168};
+  const int ys[WEATHER_TEXT_COUNT] = {4, 22, 136, 4, 184, 184, 184};
+  const int widths[WEATHER_TEXT_COUNT] = {100, 90, 100, 62, 64, 64, 64};
+  bool ok = true;
+  for (int strip = 0; strip < WEATHER_TEXT_COUNT && ok; strip++) {
+    for (int row = 0; row < WEATHER_TEXT_H; row++) {
+      if (stream->readBytes((uint8_t *)rowBuf, WEATHER_TEXT_W * 2) != WEATHER_TEXT_W * 2) { ok = false; break; }
+      tft.pushImage(xs[strip], ys[strip] + row, widths[strip], 1, rowBuf);
+      yield();
+    }
+  }
+  http.end();
+  return ok;
+}
+
+void drawWeatherScreen() {
+  if (!weather.valid) {
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("Weather unavailable", SCREEN_CX, 104, 2);
+    tft.drawString("Waiting for Mac bridge", SCREEN_CX, 130, 2);
+    weatherChromeDrawn = true;
+    return;
+  }
+  tft.fillScreen(TFT_BLACK);
+  weatherChromeDrawn = true;
+  weatherTextDrawnRev = -1;
+  weatherDirty = false;
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(weatherValue(weather.temperature, " C"), 12, 48, 7);
+  drawWeatherIcon(174, 48, weather.code, 48);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("Feels " + weatherValue(weather.apparent, " C"), 12, 102, 2);
+  tft.drawString("H/L " + weatherValue(weather.high) + "/" + weatherValue(weather.low), 12, 124, 2);
+  tft.drawString("Humidity " + weatherValue(weather.humidity, "%"), 12, 146, 2);
+  tft.drawString("Rain " + weatherValue(weather.rain, "%"), 128, 112, 2);
+  tft.drawString("Wind " + weatherValue(weather.windSpeed, " km/h"), 116, 158, 2);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("AQI " + weatherValue(weather.aqi), 232, 22, 2);
+  if (weather.stale) {
+    tft.setTextDatum(TR_DATUM); tft.setTextColor(TFT_YELLOW, TFT_BLACK); tft.drawString("!", 232, 22, 2);
+  }
+  for (int i = 0; i < weather.forecastCount; i++) {
+    int x = 8 + i * 80;
+    drawWeatherIcon(x + 18, 201, weather.forecast[i].code, 25);
+    tft.setTextDatum(TC_DATUM); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString(weatherValue(weather.forecast[i].high) + "/" + weatherValue(weather.forecast[i].low), x + 32, 227, 1);
+  }
+  if (weather.textRev != weatherTextDrawnRev && drawWeatherText()) weatherTextDrawnRev = weather.textRev;
+}
+
+void pollWeather() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, "http://" + bridgeHost + "/weather")) return;
+  if (http.GET() == HTTP_CODE_OK) handleWeatherPayload(http.getString());
+  http.end();
+}
+
 // ---------- WiFi / bridge polling ----------
 
 WiFiManager wifiManager; // global: the config portal now runs non-blocking in loop()
@@ -1523,10 +1694,32 @@ bool parseStatusJson(const String &payload) {
 // music page.
 DisplayMode effectiveMode() {
   if (displayMode == MODE_AUTO) {
-    if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
+    bool approval = claudeStatus.needsInput || codexStatus.needsInput;
+    bool working = claudeStatus.status == "working" || codexStatus.status == "working";
+    AutoModeInputs priority;
+    priority.approval = approval;
+    priority.working = working;
+    priority.music = statusMusicPlaying && WiFi.status() == WL_CONNECTED;
+    AutoModeChoice choice = chooseAutoMode(priority);
+    if (choice == AUTO_MODE_APPROVAL || choice == AUTO_MODE_AGENT) {
+      weatherAutoUntilMs = 0;
+      return MODE_AUTO;
+    }
     // music page needs HTTP for cover/text bitmaps, so don't auto-promote
     // when running wired-only (no WiFi)
-    if (statusMusicPlaying && WiFi.status() == WL_CONNECTED) return MODE_MUSIC;
+    if (choice == AUTO_MODE_MUSIC) {
+      weatherAutoUntilMs = 0;
+      return MODE_MUSIC;
+    }
+    unsigned long nowMs = millis();
+    if (weather.valid && weatherAutoDueMs != 0 && (long)(nowMs - weatherAutoDueMs) >= 0) {
+      weatherAutoUntilMs = nowMs + WEATHER_AUTO_DURATION_MS;
+      weatherAutoDueMs = weatherAutoUntilMs + WEATHER_AUTO_INTERVAL_MS;
+    }
+    priority.weatherValid = weather.valid;
+    priority.weatherWindow = weatherAutoUntilMs != 0 && (long)(weatherAutoUntilMs - nowMs) > 0;
+    if (chooseAutoMode(priority) == AUTO_MODE_WEATHER) return MODE_WEATHER;
+    weatherAutoUntilMs = 0;
   }
   return displayMode;
 }
@@ -1565,7 +1758,7 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
+  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -1610,7 +1803,7 @@ void handleSerialFrame(char *line) {
       everPolled = true;
       showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK) {
+      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
         if (updateActiveApp()) drawActiveApp();
         else refreshActiveApp();
       }
@@ -1642,6 +1835,7 @@ void handleSerialFrame(char *line) {
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
+      else if (m == "weather") displayMode = MODE_WEATHER;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
     return;
@@ -1765,6 +1959,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
+  if (m == MODE_WEATHER) return "weather";
   return "auto";
 }
 
@@ -1805,8 +2000,9 @@ void handleApiDisplay() {
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
+  else if (mode == "weather") displayMode = MODE_WEATHER;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|weather");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -1819,6 +2015,9 @@ void handleApiDisplay() {
   } else if (displayMode == MODE_STOCK) {
     stockChromeDrawn = false;
     lastStockPollMs = 0; // poll + draw on the next loop tick
+  } else if (displayMode == MODE_WEATHER) {
+    weatherChromeDrawn = false;
+    lastWeatherPollMs = 0;
   } else {
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
@@ -2209,6 +2408,14 @@ void loop() {
 
   unsigned long nowMs = millis();
 
+  // Weather stays warm in AUTO so a scheduled window never blocks on HTTP.
+  if (WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
+      (displayMode == MODE_AUTO || displayMode == MODE_WEATHER) &&
+      (lastWeatherPollMs == 0 || nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS)) {
+    lastWeatherPollMs = nowMs;
+    pollWeather();
+  }
+
   // Effective mode may differ from the configured one (AUTO -> music while
   // audio plays). On a transition, reset the incoming mode's chrome so it
   // repaints cleanly, and repaint the pet immediately when returning to it.
@@ -2224,6 +2431,9 @@ void loop() {
     } else if (eff == MODE_STOCK) {
       stockChromeDrawn = false;
       lastStockPollMs = 0;
+    } else if (eff == MODE_WEATHER) {
+      weatherChromeDrawn = false;
+      lastWeatherPollMs = 0;
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -2254,6 +2464,8 @@ void loop() {
       if (!wiredActive()) pollStock();
     }
     if (!stockChromeDrawn || stockDirty) drawStockScreen();
+  } else if (eff == MODE_WEATHER) {
+    if (!weatherChromeDrawn || weatherDirty) drawWeatherScreen();
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {

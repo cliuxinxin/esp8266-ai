@@ -45,6 +45,8 @@ service.musicPlayingProvider = { nowPlaying.snapshot.playing }
 
 let stockMonitor = StockMonitor()
 stockMonitor.start()
+let weatherMonitor = WeatherMonitor()
+weatherMonitor.start()
 
 // Wired fallback: if the clock is plugged in over USB, push status/net down
 // the serial line (works around AP client isolation; no WiFi setup needed).
@@ -60,10 +62,12 @@ let server = HTTPServer(port: port, routes: [
     },
     "/music": { nowPlaying.jsonData() },
     "/stock": { stockMonitor.jsonData() },
+    "/weather": { weatherMonitor.jsonData() },
 ], binaryRoutes: [
     "/music/cover.raw": { nowPlaying.coverRGB565 },
     "/music/text.raw": { nowPlaying.textRGB565 },
     "/stock/names.raw": { stockMonitor.namesRGB565() },
+    "/weather/text.raw": { weatherMonitor.textRGB565() },
 ], postRoutes: [
     // Claude Code / Codex hooks push lifecycle events here (see README §7):
     // curl -d '{"agent":"claude","event":"PreToolUse"}' http://127.0.0.1:8765/event
@@ -80,7 +84,7 @@ let server = HTTPServer(port: port, routes: [
 // Remember it (for auto-pairing / DHCP-change self-healing) and adopt it
 // outright when no device is configured yet.
 server.onRequest = { path, ip in
-    guard path == "/status" || path == "/net" || path == "/music",
+    guard path == "/status" || path == "/net" || path == "/music" || path == "/weather",
           ip != "127.0.0.1", ip != "::1", !ip.isEmpty else { return }
     DeviceClient.devicePollAt = Date()
     DeviceClient.lastSeenIP = ip
@@ -103,7 +107,8 @@ do {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let menuBar = MenuBarController(service: service, usage: usage, netMonitor: netMonitor,
-                                nowPlaying: nowPlaying, stockMonitor: stockMonitor, port: port)
+                                nowPlaying: nowPlaying, stockMonitor: stockMonitor,
+                                weatherMonitor: weatherMonitor, port: port)
 _ = menuBar // retain
 usage.startAutoRefresh()
 app.run()

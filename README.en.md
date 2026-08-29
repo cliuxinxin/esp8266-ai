@@ -32,6 +32,8 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
+An **enhanced weather page** shows current/feels-like/high/low temperature, humidity, wind, AQI, precipitation probability, and a three-day forecast. Chengdu is the default; change it from “Set weather city…” in the Mac menu. AUTO mode shows weather for 10 seconds every 15 minutes, below AI activity, approval alerts, and music in priority.
+
 ## Getting started
 
 What you need: an "SD2 mini-TV" dev board ([open-source hardware](https://oshwhub.com/q21182889/sd2), or [buy one assembled](https://mobile.yangkeduo.com/goods.html?ps=OuBjGMWE82)) and a USB **data** cable.
@@ -61,7 +63,7 @@ The bridge lives in your menu bar / tray and **auto-discovers and pairs** with t
   <img src="docs/images/working.jpg" width="640" alt="In action">
 </p>
 
-Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, music/network pages, and more).
+Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, weather city, pet swapping, music/network pages, and more).
 
 ## FAQ
 

@@ -8,6 +8,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let service: StatusService
     private let usage: UsageFetcher
+    private let weatherMonitor: WeatherMonitor
     private let port: UInt16
     private let controlMenu = NSMenu()
     private let mirrorPopover: MirrorPopoverController
@@ -18,12 +19,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var modeItems: [String: NSMenuItem] = [:]
 
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
-         nowPlaying: NowPlayingMonitor, stockMonitor: StockMonitor, port: UInt16) {
+         nowPlaying: NowPlayingMonitor, stockMonitor: StockMonitor,
+         weatherMonitor: WeatherMonitor, port: UInt16) {
         self.service = service
         self.usage = usage
         self.port = port
+        self.weatherMonitor = weatherMonitor
         self.mirrorPopover = MirrorPopoverController(service: service, netMonitor: netMonitor,
-                                                     nowPlaying: nowPlaying, stockMonitor: stockMonitor)
+                                                     nowPlaying: nowPlaying, stockMonitor: stockMonitor,
+                                                     weatherMonitor: weatherMonitor)
         super.init()
         buildMenu()
         if let button = statusItem.button {
@@ -81,7 +85,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let displayMenu = NSMenu()
         for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
                               ("固定 Codex", "codex"), ("网速曲线", "net"),
-                              ("音乐播放", "music"), ("股票行情", "stock")] {
+                              ("音乐播放", "music"), ("股票行情", "stock"), ("天气", "weather")] {
             let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = mode
@@ -94,6 +98,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         menu.addItem(makeItem("设置自选股…", #selector(setStockSymbols)))
+        menu.addItem(makeItem("设置天气城市…", #selector(setWeatherCity)))
 
         menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
 
@@ -171,8 +176,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             case let .success(info):
                 let sprites = [info.claudeCustomSprite ? "C:自定义" : "C:默认",
                                info.codexCustomSprite ? "X:自定义" : "X:默认"]
-                let showing = info.mode == "net" ? "网速"
-                    : info.mode == "music" ? "音乐"
+                let showing = info.effective == "net" ? "网速"
+                    : info.effective == "music" ? "音乐"
+                    : info.effective == "stock" ? "股票"
+                    : info.effective == "weather" ? "天气"
                     : (info.showing == "claude" ? "Claude" : "Codex")
                 self.deviceInfoItem.title =
                     "设备：\(info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
@@ -220,8 +227,47 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func refreshAction() {
         usage.refresh()
+        Task { await weatherMonitor.refresh() }
         refreshUsageLines()
         refreshDeviceSection()
+    }
+
+    @objc private func setWeatherCity() {
+        let alert = NSAlert()
+        alert.messageText = "天气城市"
+        alert.informativeText = "输入城市名，例如：成都、上海、深圳"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.stringValue = weatherMonitor.city.name
+        alert.accessoryView = input
+        alert.addButton(withTitle: "搜索")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let query = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let cities = try await self.weatherMonitor.searchCities(query: query)
+                await self.chooseWeatherCity(cities)
+            } catch {
+                await MainActor.run { Self.toast("搜索失败", error.localizedDescription) }
+            }
+        }
+    }
+
+    @MainActor private func chooseWeatherCity(_ cities: [WeatherCity]) {
+        guard !cities.isEmpty else { Self.toast("没有结果", "没有找到匹配的城市"); return }
+        let alert = NSAlert()
+        alert.messageText = "选择天气城市"
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
+        picker.addItems(withTitles: cities.map(\.displayLabel))
+        alert.accessoryView = picker
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let selected = cities[max(0, picker.indexOfSelectedItem)]
+        Task { [weak self] in await self?.weatherMonitor.setCity(selected) }
     }
 
     @objc private func setDeviceAddress() {
