@@ -1,5 +1,7 @@
 #pragma once
 
+#include "auto_display_logic.h"
+
 enum WeatherIconKind {
   WEATHER_CLEAR,
   WEATHER_PARTLY_CLOUDY,
@@ -42,9 +44,16 @@ struct AutoModeInputs {
 };
 
 inline AutoModeChoice chooseAutoMode(const AutoModeInputs &input) {
-  if (input.approval) return AUTO_MODE_APPROVAL;
-  if (input.working) return AUTO_MODE_AGENT;
-  if (input.music) return AUTO_MODE_MUSIC;
-  if (input.weatherValid && input.weatherWindow) return AUTO_MODE_WEATHER;
+  AutoSelectionInputs generic;
+  generic.approvalNeeded = input.approval;
+  generic.codexWorking = input.working;
+  generic.musicPlaying = input.music;
+  if (input.weatherWindow) generic.dueMask |= AUTO_DUE_WEATHER;
+  if (input.weatherValid) generic.validMask |= AUTO_DUE_WEATHER;
+  AutoDisplayChoice choice = chooseAutoDisplay(generic);
+  if (choice == AUTO_APPROVAL) return AUTO_MODE_APPROVAL;
+  if (choice == AUTO_CLAUDE || choice == AUTO_CODEX) return AUTO_MODE_AGENT;
+  if (choice == AUTO_MUSIC) return AUTO_MODE_MUSIC;
+  if (choice == AUTO_WEATHER) return AUTO_MODE_WEATHER;
   return AUTO_MODE_IDLE;
 }
