@@ -66,15 +66,18 @@ final class AutoDisplaySettingsStore {
     }
 
     func jsonObject() -> [String: Any] {
-        let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .convertToSnakeCase
-        guard var object = (try? encoder.encode(configuration))
-            .flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
-        else {
-            return ["revision": revision]
-        }
-        object["revision"] = revision
-        return object
+        let events = Dictionary(uniqueKeysWithValues: configuration.events.map { ($0.key.rawValue, $0.value) })
+        let scheduled = Dictionary(uniqueKeysWithValues: configuration.scheduled.map { key, value in
+            (
+                key.rawValue,
+                [
+                    "enabled": value.enabled,
+                    "interval_seconds": value.intervalSeconds,
+                    "duration_seconds": value.durationSeconds,
+                ] as [String: Any]
+            )
+        })
+        return ["events": events, "scheduled": scheduled, "revision": revision]
     }
 
     private static func loadConfiguration(from defaults: UserDefaults) -> AutoDisplayConfiguration {

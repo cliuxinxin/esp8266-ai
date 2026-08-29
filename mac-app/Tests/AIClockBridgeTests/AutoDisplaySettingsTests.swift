@@ -55,4 +55,28 @@ final class AutoDisplaySettingsTests: XCTestCase {
         XCTAssertGreaterThan(store.revision, oldRevision)
         XCTAssertEqual(store.jsonObject()["revision"] as? Int, store.revision)
     }
+
+    func testJSONContainsStableIDKeyedEventAndScheduledObjects() throws {
+        let suiteName = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AutoDisplaySettingsStore(defaults: defaults)
+
+        let object = store.jsonObject()
+        let events = try XCTUnwrap(object["events"] as? [String: Any])
+        let scheduled = try XCTUnwrap(object["scheduled"] as? [String: Any])
+        let weather = try XCTUnwrap(scheduled["weather"] as? [String: Any])
+        let quote = try XCTUnwrap(scheduled["quote"] as? [String: Any])
+
+        XCTAssertEqual(Set(events.keys), Set(["claude", "codex", "approval", "music"]))
+        XCTAssertEqual(Set(scheduled.keys), Set(["weather", "quote", "stock", "net"]))
+        XCTAssertEqual(events["claude"] as? Bool, false)
+        XCTAssertEqual(events["codex"] as? Bool, true)
+        XCTAssertEqual(weather["enabled"] as? Bool, true)
+        XCTAssertEqual(weather["interval_seconds"] as? Int, 900)
+        XCTAssertEqual(weather["duration_seconds"] as? Int, 10)
+        XCTAssertEqual(quote["enabled"] as? Bool, true)
+        XCTAssertEqual(quote["interval_seconds"] as? Int, 1800)
+        XCTAssertEqual(quote["duration_seconds"] as? Int, 12)
+    }
 }
