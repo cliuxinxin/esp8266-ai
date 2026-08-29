@@ -88,6 +88,8 @@ final class MirrorView: NSView {
     var stockRows: [StockMonitor.Row] = []
     var weatherMode = false
     var weatherSnapshot: WeatherSnapshot?
+    var quoteMode = false
+    var quoteSnapshot: QuoteSnapshot?
     var netHeaderDL = "0B"
     var netHeaderUL = "0B"
     private static let netCols = 224 // NET_CHART_W
@@ -155,6 +157,11 @@ final class MirrorView: NSView {
         }
         if weatherMode {
             drawWeatherScene()
+            ctx.restoreGState()
+            return
+        }
+        if quoteMode {
+            drawQuoteScene()
             ctx.restoreGState()
             return
         }
@@ -282,6 +289,52 @@ final class MirrorView: NSView {
             let warning = metrics.merging([.foregroundColor: NSColor.systemYellow]) { _, new in new }
             ("!" as NSString).draw(in: NSRect(x: 222, y: 23, width: 12, height: 18), withAttributes: warning)
         }
+    }
+
+    private func drawQuoteScene() {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        ("DAILY QUOTE" as NSString).draw(in: NSRect(x: 8, y: 10, width: 224, height: 18), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.systemTeal,
+            .paragraphStyle: center,
+        ])
+
+        guard let quote = quoteSnapshot else {
+            ("暂无名言" as NSString).draw(in: NSRect(x: 16, y: 105, width: 208, height: 22), withAttributes: [
+                .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: center,
+            ])
+            return
+        }
+
+        let body = NSMutableParagraphStyle()
+        body.alignment = .left
+        body.lineBreakMode = .byWordWrapping
+        ("“\(quote.text)”" as NSString).draw(in: NSRect(x: 16, y: 37, width: 208, height: 145), withAttributes: [
+            .font: NSFont.systemFont(ofSize: quote.language == "zh" ? 17 : 15, weight: .medium),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: body,
+        ])
+
+        let author = NSMutableParagraphStyle()
+        author.alignment = .right
+        ("— \(quote.author)" as NSString).draw(in: NSRect(x: 16, y: 184, width: 208, height: 18), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor(white: 0.75, alpha: 1),
+            .paragraphStyle: author,
+        ])
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        let footer = "\(quote.language.uppercased())  ·  \(formatter.string(from: quote.updatedAt))"
+        (footer as NSString).draw(in: NSRect(x: 16, y: 211, width: 208, height: 16), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .regular),
+            .foregroundColor: NSColor(white: 0.48, alpha: 1),
+            .paragraphStyle: body,
+        ])
     }
 
     private func drawMusicScene(_ ctx: CGContext) {
@@ -498,9 +551,13 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let nowPlaying: NowPlayingMonitor
     private let stockMonitor: StockMonitor
     private let weatherMonitor: WeatherMonitor
+    private let quoteMonitor: QuoteMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "C", "X", "网速", "音乐", "股票", "天气"],
+    private static let modeSegments = [("自动", "auto"), ("C", "claude"), ("X", "codex"),
+                                       ("网速", "net"), ("音乐", "music"), ("股票", "stock"),
+                                       ("天气", "weather"), ("言", "quote")]
+    private let modeControl = NSSegmentedControl(labels: modeSegments.map(\.0),
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -519,12 +576,13 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var fetchingSlot: String?
 
     init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor,
-         stockMonitor: StockMonitor, weatherMonitor: WeatherMonitor) {
+         stockMonitor: StockMonitor, weatherMonitor: WeatherMonitor, quoteMonitor: QuoteMonitor) {
         self.service = service
         self.netMonitor = netMonitor
         self.nowPlaying = nowPlaying
         self.stockMonitor = stockMonitor
         self.weatherMonitor = weatherMonitor
+        self.quoteMonitor = quoteMonitor
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -657,12 +715,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
-                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3,
-                               "music": 4, "stock": 5, "weather": 6][info.mode] ?? 0
+                let modeIdx = Self.modeSegments.firstIndex { $0.1 == info.mode } ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
-                    : info.mode == "music" ? "音乐播放" : "固定显示"
+                    : info.mode == "music" ? "音乐播放"
+                    : info.mode == "quote" ? "名人名言" : "固定显示"
                 self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
             case .failure:
                 self.mirror.deviceOK = false
@@ -691,6 +749,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         mirror.musicMode = info.effective == "music"
         mirror.stockMode = info.effective == "stock"
         mirror.weatherMode = info.effective == "weather"
+        mirror.quoteMode = info.effective == "quote"
+        if mirror.quoteMode {
+            mirror.quoteSnapshot = quoteMonitor.snapshot
+            mirror.needsDisplay = true
+            return
+        }
         if mirror.weatherMode {
             mirror.weatherSnapshot = weatherMonitor.snapshot
             mirror.needsDisplay = true
@@ -808,7 +872,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music", "stock", "weather"][max(0, modeControl.selectedSegment)]
+        let index = max(0, min(modeControl.selectedSegment, Self.modeSegments.count - 1))
+        let mode = Self.modeSegments[index].1
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

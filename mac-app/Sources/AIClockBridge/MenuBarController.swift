@@ -9,9 +9,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let service: StatusService
     private let usage: UsageFetcher
     private let weatherMonitor: WeatherMonitor
+    private let quoteMonitor: QuoteMonitor
     private let port: UInt16
     private let controlMenu = NSMenu()
     private let mirrorPopover: MirrorPopoverController
+    private let settingsWindow: AutoDisplaySettingsWindowController
 
     private let claudeUsageItem = NSMenuItem(title: "Claude …", action: nil, keyEquivalent: "")
     private let codexUsageItem = NSMenuItem(title: "Codex …", action: nil, keyEquivalent: "")
@@ -20,14 +22,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
          nowPlaying: NowPlayingMonitor, stockMonitor: StockMonitor,
-         weatherMonitor: WeatherMonitor, port: UInt16) {
+         weatherMonitor: WeatherMonitor, settingsStore: AutoDisplaySettingsStore,
+         quoteMonitor: QuoteMonitor, port: UInt16) {
         self.service = service
         self.usage = usage
         self.port = port
         self.weatherMonitor = weatherMonitor
+        self.quoteMonitor = quoteMonitor
+        self.settingsWindow = AutoDisplaySettingsWindowController(store: settingsStore)
         self.mirrorPopover = MirrorPopoverController(service: service, netMonitor: netMonitor,
                                                      nowPlaying: nowPlaying, stockMonitor: stockMonitor,
-                                                     weatherMonitor: weatherMonitor)
+                                                     weatherMonitor: weatherMonitor,
+                                                     quoteMonitor: quoteMonitor)
         super.init()
         buildMenu()
         if let button = statusItem.button {
@@ -85,7 +91,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let displayMenu = NSMenu()
         for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
                               ("固定 Codex", "codex"), ("网速曲线", "net"),
-                              ("音乐播放", "music"), ("股票行情", "stock"), ("天气", "weather")] {
+                              ("音乐播放", "music"), ("股票行情", "stock"), ("天气", "weather"),
+                              ("名人名言", "quote")] {
             let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = mode
@@ -97,6 +104,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(displayItem)
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
+        menu.addItem(makeItem("自动显示设置…", #selector(openAutoDisplaySettings)))
+        menu.addItem(makeItem("换一句", #selector(nextQuote)))
         menu.addItem(makeItem("设置自选股…", #selector(setStockSymbols)))
         menu.addItem(makeItem("设置天气城市…", #selector(setWeatherCity)))
 
@@ -176,11 +185,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             case let .success(info):
                 let sprites = [info.claudeCustomSprite ? "C:自定义" : "C:默认",
                                info.codexCustomSprite ? "X:自定义" : "X:默认"]
-                let showing = info.effective == "net" ? "网速"
-                    : info.effective == "music" ? "音乐"
-                    : info.effective == "stock" ? "股票"
-                    : info.effective == "weather" ? "天气"
-                    : (info.showing == "claude" ? "Claude" : "Codex")
+                let showing = Self.effectiveDisplayName(for: info)
                 self.deviceInfoItem.title =
                     "设备：\(info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
                 for (mode, item) in self.modeItems { item.state = mode == info.mode ? .on : .off }
@@ -230,6 +235,32 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         Task { await weatherMonitor.refresh() }
         refreshUsageLines()
         refreshDeviceSection()
+    }
+
+    @objc private func openAutoDisplaySettings() {
+        settingsWindow.show()
+    }
+
+    @objc private func nextQuote() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.quoteMonitor.refresh(force: true)
+            DeviceClient.fetchInfo { result in
+                guard case let .success(info) = result, info.mode == "quote" else { return }
+                DeviceClient.setDisplayMode("quote") { _ in }
+            }
+        }
+    }
+
+    static func effectiveDisplayName(for info: DeviceInfo) -> String {
+        switch info.effective {
+        case "net": return "网速"
+        case "music": return "音乐"
+        case "stock": return "股票"
+        case "weather": return "天气"
+        case "quote": return "名言"
+        default: return info.showing == "claude" ? "Claude" : "Codex"
+        }
     }
 
     @objc private func setWeatherCity() {
