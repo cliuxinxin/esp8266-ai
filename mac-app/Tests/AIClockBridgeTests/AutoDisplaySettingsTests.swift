@@ -3,6 +3,7 @@ import XCTest
 
 private final class TestSettingsPersistence: AutoDisplaySettingsPersistence {
     private var values: [String: Any] = [:]
+    private let lock = NSLock()
     var rejectedKey: String?
 
     init(rejectedKey: String? = nil) {
@@ -10,16 +11,34 @@ private final class TestSettingsPersistence: AutoDisplaySettingsPersistence {
     }
 
     func data(forKey key: String) -> Data? {
-        values[key] as? Data
+        lock.lock(); defer { lock.unlock() }
+        return values[key] as? Data
     }
 
     func integer(forKey key: String) -> Int {
-        values[key] as? Int ?? 0
+        lock.lock(); defer { lock.unlock() }
+        return values[key] as? Int ?? 0
     }
 
     func set(_ value: Any?, forKey key: String) {
+        lock.lock(); defer { lock.unlock() }
         guard key != rejectedKey else { return }
         values[key] = value
+    }
+}
+
+private final class SettingsSnapshotMismatchRecorder {
+    private let lock = NSLock()
+    private var mismatches = 0
+
+    func recordMismatch() {
+        lock.lock(); defer { lock.unlock() }
+        mismatches += 1
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return mismatches
     }
 }
 
@@ -144,6 +163,72 @@ final class AutoDisplaySettingsTests: XCTestCase {
         XCTAssertEqual(storedConfiguration.scheduled[.quote]?.durationSeconds, 60)
         XCTAssertGreaterThan(store.revision, oldRevision)
         XCTAssertEqual(store.jsonObject()["revision"] as? Int, store.revision)
+    }
+
+    func testDecodedIncompleteConfigurationMergesEveryMissingProductDefault() throws {
+        let persistence = TestSettingsPersistence()
+        let incomplete = AutoDisplayConfiguration(
+            events: [.claude: true],
+            scheduled: [.quote: .init(enabled: false, intervalSeconds: 1_200, durationSeconds: 15)]
+        )
+        persistence.set(try JSONEncoder().encode(incomplete), forKey: "auto_display_configuration_v1")
+        persistence.set(9, forKey: "auto_display_revision")
+
+        let configuration = AutoDisplaySettingsStore(persistence: persistence).configuration
+
+        XCTAssertEqual(configuration.events, [
+            .claude: true,
+            .codex: true,
+            .approval: true,
+            .music: true,
+        ])
+        XCTAssertEqual(configuration.scheduled[.quote],
+                       .init(enabled: false, intervalSeconds: 1_200, durationSeconds: 15))
+        XCTAssertEqual(configuration.scheduled[.weather], AutoDisplayConfiguration.defaults.scheduled[.weather])
+        XCTAssertEqual(configuration.scheduled[.stock], AutoDisplayConfiguration.defaults.scheduled[.stock])
+        XCTAssertEqual(configuration.scheduled[.net], AutoDisplayConfiguration.defaults.scheduled[.net])
+    }
+
+    func testConcurrentJSONSnapshotsNeverPairConfigurationWithAnotherRevision() {
+        let store = AutoDisplaySettingsStore(persistence: TestSettingsPersistence())
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let recorder = SettingsSnapshotMismatchRecorder()
+
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            start.wait()
+            for expectedRevision in 1...5_000 {
+                var configuration = AutoDisplayConfiguration.defaults
+                configuration.events[.claude] = !expectedRevision.isMultiple(of: 2)
+                if !store.save(configuration) {
+                    recorder.recordMismatch()
+                }
+            }
+            group.leave()
+        }
+
+        for _ in 0..<4 {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                start.wait()
+                for _ in 0..<20_000 {
+                    let object = store.jsonObject()
+                    guard let revision = object["revision"] as? Int,
+                          let events = object["events"] as? [String: Any],
+                          let claude = events["claude"] as? Bool,
+                          claude == !revision.isMultiple(of: 2) else {
+                        recorder.recordMismatch()
+                        continue
+                    }
+                }
+                group.leave()
+            }
+        }
+
+        for _ in 0..<5 { start.signal() }
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(recorder.count, 0)
     }
 
     func testStoreDoesNotCommitStateWhenRevisionCannotBeReadBack() {

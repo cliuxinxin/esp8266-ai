@@ -6,6 +6,7 @@ import Foundation
 
 struct DeviceInfo {
     var ip = ""
+    var firmwareVersion = ""
     var ssid = ""
     var bridge = ""
     var mode = "auto"       // configured: auto | claude | codex | net | music | stock | weather | quote
@@ -68,6 +69,7 @@ final class DeviceClient {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         var info = DeviceInfo()
         info.ip = obj["ip"] as? String ?? ""
+        info.firmwareVersion = obj["fw"] as? String ?? ""
         info.ssid = obj["ssid"] as? String ?? ""
         info.bridge = obj["bridge"] as? String ?? ""
         info.mode = obj["mode"] as? String ?? "auto"
@@ -85,6 +87,24 @@ final class DeviceClient {
         info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
         info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
         return info
+    }
+
+    /// Returns nil when the device does not expose a parseable semantic
+    /// version, so callers only warn when a reachable device is known old.
+    static func supportsAutoDisplayConfiguration(firmwareVersion: String) -> Bool? {
+        var version = firmwareVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        if version.first == "v" || version.first == "V" { version.removeFirst() }
+        let core = version.split(maxSplits: 1, whereSeparator: { $0 == "-" || $0 == "+" }).first ?? ""
+        let components = core.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 3 else { return nil }
+        let numbers = components.compactMap { Int($0) }
+        guard numbers.count == 3, numbers.allSatisfy({ $0 >= 0 }) else { return nil }
+
+        let minimum = [0, 4, 13]
+        for index in minimum.indices where numbers[index] != minimum[index] {
+            return numbers[index] > minimum[index]
+        }
+        return true
     }
 
     /// POST /api/display. Mode is intentionally not client-validated so new

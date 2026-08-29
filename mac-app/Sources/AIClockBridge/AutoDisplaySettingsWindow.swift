@@ -261,6 +261,18 @@ final class AutoDisplaySettingsWindowController: NSWindowController {
             return
         }
         window?.close()
+        DeviceClient.fetchInfo { result in
+            guard case let .success(info) = result,
+                  DeviceClient.supportsAutoDisplayConfiguration(
+                    firmwareVersion: info.firmwareVersion
+                  ) == false else { return }
+            let alert = NSAlert()
+            alert.messageText = "设备固件需要更新"
+            alert.informativeText = "设置已保存在这台 Mac 上，但当前设备固件 \(info.firmwareVersion) 不支持自动显示配置和名人名言。请升级到 v0.4.13 或更高版本。"
+            alert.addButton(withTitle: "知道了")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 
     @objc private func cancelAction() {

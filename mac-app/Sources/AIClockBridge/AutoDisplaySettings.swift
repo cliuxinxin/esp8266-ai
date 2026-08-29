@@ -38,6 +38,12 @@ struct AutoDisplayConfiguration: Codable, Equatable {
     )
 
     mutating func normalize() {
+        for (key, value) in Self.defaults.events where events[key] == nil {
+            events[key] = value
+        }
+        for (key, value) in Self.defaults.scheduled where scheduled[key] == nil {
+            scheduled[key] = value
+        }
         for key in [AutoDisplayItemID.weather, .quote, .stock, .net] {
             guard var item = scheduled[key] else { continue }
             item.intervalSeconds = min(14_400, max(60, item.intervalSeconds))
@@ -51,9 +57,17 @@ final class AutoDisplaySettingsStore {
     private static let configurationKey = "auto_display_configuration_v1"
     private static let revisionKey = "auto_display_revision"
 
+    private struct State {
+        var configuration: AutoDisplayConfiguration
+        var revision: Int
+    }
+
     private let persistence: AutoDisplaySettingsPersistence
-    private(set) var configuration: AutoDisplayConfiguration
-    private(set) var revision: Int
+    private let lock = NSLock()
+    private var state: State
+
+    var configuration: AutoDisplayConfiguration { withStateLock { state.configuration } }
+    var revision: Int { withStateLock { state.revision } }
 
     convenience init(defaults: UserDefaults = .standard) {
         self.init(persistence: defaults)
@@ -61,8 +75,10 @@ final class AutoDisplaySettingsStore {
 
     init(persistence: AutoDisplaySettingsPersistence) {
         self.persistence = persistence
-        self.configuration = Self.loadConfiguration(from: persistence)
-        self.revision = persistence.integer(forKey: Self.revisionKey)
+        self.state = State(
+            configuration: Self.loadConfiguration(from: persistence),
+            revision: persistence.integer(forKey: Self.revisionKey)
+        )
     }
 
     @discardableResult
@@ -72,27 +88,29 @@ final class AutoDisplaySettingsStore {
 
         guard let data = try? JSONEncoder().encode(normalizedConfiguration) else { return false }
 
-        let previousData = persistence.data(forKey: Self.configurationKey)
-        let previousRevision = persistence.integer(forKey: Self.revisionKey)
-        let nextRevision = revision + 1
-        persistence.set(data, forKey: Self.configurationKey)
-        persistence.set(nextRevision, forKey: Self.revisionKey)
+        return withStateLock {
+            let previousData = persistence.data(forKey: Self.configurationKey)
+            let previousRevision = persistence.integer(forKey: Self.revisionKey)
+            let nextRevision = state.revision + 1
+            persistence.set(data, forKey: Self.configurationKey)
+            persistence.set(nextRevision, forKey: Self.revisionKey)
 
-        guard persistence.data(forKey: Self.configurationKey) == data,
-              persistence.integer(forKey: Self.revisionKey) == nextRevision else {
-            persistence.set(previousData, forKey: Self.configurationKey)
-            persistence.set(previousRevision, forKey: Self.revisionKey)
-            return false
+            guard persistence.data(forKey: Self.configurationKey) == data,
+                  persistence.integer(forKey: Self.revisionKey) == nextRevision else {
+                persistence.set(previousData, forKey: Self.configurationKey)
+                persistence.set(previousRevision, forKey: Self.revisionKey)
+                return false
+            }
+
+            state = State(configuration: normalizedConfiguration, revision: nextRevision)
+            return true
         }
-
-        self.configuration = normalizedConfiguration
-        revision = nextRevision
-        return true
     }
 
     func jsonObject() -> [String: Any] {
-        let events = Dictionary(uniqueKeysWithValues: configuration.events.map { ($0.key.rawValue, $0.value) })
-        let scheduled = Dictionary(uniqueKeysWithValues: configuration.scheduled.map { key, value in
+        let snapshot = withStateLock { state }
+        let events = Dictionary(uniqueKeysWithValues: snapshot.configuration.events.map { ($0.key.rawValue, $0.value) })
+        let scheduled = Dictionary(uniqueKeysWithValues: snapshot.configuration.scheduled.map { key, value in
             (
                 key.rawValue,
                 [
@@ -102,7 +120,7 @@ final class AutoDisplaySettingsStore {
                 ] as [String: Any]
             )
         })
-        return ["events": events, "scheduled": scheduled, "revision": revision]
+        return ["events": events, "scheduled": scheduled, "revision": snapshot.revision]
     }
 
     private static func loadConfiguration(from persistence: AutoDisplaySettingsPersistence) -> AutoDisplayConfiguration {
@@ -113,5 +131,10 @@ final class AutoDisplaySettingsStore {
         }
         configuration.normalize()
         return configuration
+    }
+
+    private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock(); defer { lock.unlock() }
+        return try body()
     }
 }

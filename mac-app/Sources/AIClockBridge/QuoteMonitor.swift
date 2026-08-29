@@ -48,6 +48,9 @@ final class QuoteMonitor {
     private static let zenQuotesURL = URL(string: "https://zenquotes.io/api/random")!
     private static let maxRecentTexts = 20
     private static let maxContentAttempts = 3
+    private static let cacheVersion = 1
+    private static let bodyRect = NSRect(x: 16, y: 58, width: 208, height: 145)
+    private static let authorRect = NSRect(x: 16, y: 37, width: 208, height: 18)
 
     private let client: QuoteHTTPClient
     private let cacheURL: URL
@@ -57,6 +60,8 @@ final class QuoteMonitor {
     private let lock = NSLock()
     private var storedSnapshot: QuoteSnapshot?
     private var storedText = Data()
+    private var latestChinese: QuoteSnapshot?
+    private var latestEnglish: QuoteSnapshot?
     private var recentTexts: [String] = []
     private var refreshInFlight = false
     private var refreshPending = false
@@ -72,11 +77,16 @@ final class QuoteMonitor {
         self.nowProvider = now
         self.staleAfter = staleAfter
         self.errorReporter = errorReporter
-        if let data = try? Data(contentsOf: self.cacheURL),
-           let cached = try? JSONDecoder().decode(QuoteSnapshot.self, from: data) {
+        let loadedCache = Self.loadCache(from: self.cacheURL)
+        latestChinese = loadedCache.envelope.latestChinese
+        latestEnglish = loadedCache.envelope.latestEnglish
+        recentTexts = loadedCache.envelope.recentTexts
+        if let cached = loadedCache.envelope.currentSnapshot {
             storedSnapshot = cached
             storedText = Self.renderQuotePage(cached)
-            appendRecent(cached.text)
+        }
+        if loadedCache.migratedLegacySnapshot {
+            Self.persist(loadedCache.envelope, to: self.cacheURL)
         }
     }
 
@@ -132,8 +142,26 @@ final class QuoteMonitor {
 
     static func isDisplayable(_ quote: QuoteSnapshot) -> Bool {
         let count = quote.text.count
-        return !quote.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && count <= (quote.language == "zh" ? 80 : 180)
+        guard !quote.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !quote.author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              count <= (quote.language == "zh" ? 80 : 180) else {
+            return false
+        }
+
+        let bodyBounds = ("“\(quote.text)”" as NSString).boundingRect(
+            with: NSSize(width: bodyRect.width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: bodyTextAttributes(for: quote.language)
+        )
+        let authorBounds = ("— \(quote.author)" as NSString).boundingRect(
+            with: NSSize(width: .greatestFiniteMagnitude, height: authorRect.height),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: authorTextAttributes()
+        )
+        return ceil(bodyBounds.width) <= bodyRect.width
+            && ceil(bodyBounds.height) <= bodyRect.height
+            && ceil(authorBounds.width) <= authorRect.width
+            && ceil(authorBounds.height) <= authorRect.height
     }
 
     static func parseHitokoto(_ data: Data) throws -> QuoteSnapshot {
@@ -161,12 +189,18 @@ final class QuoteMonitor {
 
     private func publish(_ quote: QuoteSnapshot) {
         let rendered = Self.renderQuotePage(quote)
-        withStateLock {
+        let envelope = withStateLock {
             storedSnapshot = quote
             storedText = rendered
+            if quote.language == "zh" {
+                latestChinese = quote
+            } else {
+                latestEnglish = quote
+            }
             appendRecent(quote.text)
+            return cacheEnvelope()
         }
-        persist(quote)
+        Self.persist(envelope, to: cacheURL)
     }
 
     private func beginRefresh(force: Bool) -> Bool {
@@ -197,8 +231,32 @@ final class QuoteMonitor {
         }
     }
 
-    private func persist(_ snapshot: QuoteSnapshot) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+    private func cacheEnvelope() -> QuoteCacheEnvelope {
+        QuoteCacheEnvelope(version: Self.cacheVersion, latestChinese: latestChinese,
+                           latestEnglish: latestEnglish, recentTexts: recentTexts)
+    }
+
+    private static func loadCache(from cacheURL: URL) -> LoadedQuoteCache {
+        guard let data = try? Data(contentsOf: cacheURL) else { return .empty }
+        if var envelope = try? JSONDecoder().decode(QuoteCacheEnvelope.self, from: data),
+           envelope.version == cacheVersion {
+            envelope.normalize(maxRecentTexts: maxRecentTexts)
+            return LoadedQuoteCache(envelope: envelope, migratedLegacySnapshot: false)
+        }
+        if let legacy = try? JSONDecoder().decode(QuoteSnapshot.self, from: data) {
+            let envelope = QuoteCacheEnvelope(
+                version: cacheVersion,
+                latestChinese: legacy.language == "zh" ? legacy : nil,
+                latestEnglish: legacy.language == "en" ? legacy : nil,
+                recentTexts: [legacy.text]
+            )
+            return LoadedQuoteCache(envelope: envelope, migratedLegacySnapshot: true)
+        }
+        return .empty
+    }
+
+    private static func persist(_ envelope: QuoteCacheEnvelope, to cacheURL: URL) {
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
         let directory = cacheURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = cacheURL.appendingPathExtension("tmp")
@@ -234,6 +292,26 @@ final class QuoteMonitor {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func bodyTextAttributes(for language: String) -> [NSAttributedString.Key: Any] {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping
+        style.alignment = .left
+        return [
+            .font: NSFont.systemFont(ofSize: language == "zh" ? 17 : 15, weight: .medium),
+            .paragraphStyle: style,
+        ]
+    }
+
+    private static func authorTextAttributes() -> [NSAttributedString.Key: Any] {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byClipping
+        style.alignment = .right
+        return [
+            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+            .paragraphStyle: style,
+        ]
+    }
+
     private static func renderQuotePage(_ quote: QuoteSnapshot) -> Data {
         let size = 240
         guard let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
@@ -253,22 +331,12 @@ final class QuoteMonitor {
             .foregroundColor: NSColor.systemTeal,
             .paragraphStyle: titleStyle,
         ])
-        let quoteStyle = NSMutableParagraphStyle()
-        quoteStyle.lineBreakMode = .byWordWrapping
-        quoteStyle.alignment = .left
-        let quoteFont = NSFont.systemFont(ofSize: quote.language == "zh" ? 17 : 15, weight: .medium)
-        ("“\(quote.text)”" as NSString).draw(in: NSRect(x: 16, y: 58, width: 208, height: 145), withAttributes: [
-            .font: quoteFont,
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: quoteStyle,
-        ])
-        let authorStyle = NSMutableParagraphStyle()
-        authorStyle.alignment = .right
-        ("— \(quote.author)" as NSString).draw(in: NSRect(x: 16, y: 37, width: 208, height: 18), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
-            .foregroundColor: NSColor(white: 0.75, alpha: 1),
-            .paragraphStyle: authorStyle,
-        ])
+        var bodyAttributes = bodyTextAttributes(for: quote.language)
+        bodyAttributes[.foregroundColor] = NSColor.white
+        ("“\(quote.text)”" as NSString).draw(in: bodyRect, withAttributes: bodyAttributes)
+        var authorAttributes = authorTextAttributes()
+        authorAttributes[.foregroundColor] = NSColor(white: 0.75, alpha: 1)
+        ("— \(quote.author)" as NSString).draw(in: authorRect, withAttributes: authorAttributes)
         let footerStyle = NSMutableParagraphStyle()
         footerStyle.alignment = .left
         let formatter = DateFormatter()
@@ -295,6 +363,52 @@ final class QuoteMonitor {
         }
         return output
     }
+}
+
+private struct QuoteCacheEnvelope: Codable {
+    var version: Int
+    var latestChinese: QuoteSnapshot?
+    var latestEnglish: QuoteSnapshot?
+    var recentTexts: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case latestChinese = "latest_chinese"
+        case latestEnglish = "latest_english"
+        case recentTexts = "recent_texts"
+    }
+
+    var currentSnapshot: QuoteSnapshot? {
+        [latestChinese, latestEnglish].compactMap { $0 }.max {
+            if $0.textRev != $1.textRev { return $0.textRev < $1.textRev }
+            return $0.updatedAt < $1.updatedAt
+        }
+    }
+
+    mutating func normalize(maxRecentTexts: Int) {
+        var normalized: [String] = []
+        for text in recentTexts {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            normalized.removeAll { $0 == trimmed }
+            normalized.append(trimmed)
+        }
+        if normalized.count > maxRecentTexts {
+            normalized.removeFirst(normalized.count - maxRecentTexts)
+        }
+        recentTexts = normalized
+    }
+}
+
+private struct LoadedQuoteCache {
+    var envelope: QuoteCacheEnvelope
+    var migratedLegacySnapshot: Bool
+
+    static let empty = LoadedQuoteCache(
+        envelope: QuoteCacheEnvelope(version: 1, latestChinese: nil,
+                                     latestEnglish: nil, recentTexts: []),
+        migratedLegacySnapshot: false
+    )
 }
 
 private enum QuoteMonitorError: Error {
