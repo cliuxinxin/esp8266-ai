@@ -86,6 +86,8 @@ final class MirrorView: NSView {
     var netMem = -1
     var stockMode = false
     var stockRows: [StockMonitor.Row] = []
+    var weatherMode = false
+    var weatherSnapshot: WeatherSnapshot?
     var netHeaderDL = "0B"
     var netHeaderUL = "0B"
     private static let netCols = 224 // NET_CHART_W
@@ -148,6 +150,11 @@ final class MirrorView: NSView {
         }
         if stockMode {
             drawStockScene()
+            ctx.restoreGState()
+            return
+        }
+        if weatherMode {
+            drawWeatherScene()
             ctx.restoreGState()
             return
         }
@@ -223,6 +230,43 @@ final class MirrorView: NSView {
             NSRect(x: 240 - m - t, y: m, width: t, height: side).fill()
         }
         ctx.restoreGState()
+    }
+
+    private func drawWeatherScene() {
+        guard let weather = weatherSnapshot else { return }
+        let left = NSMutableParagraphStyle(); left.alignment = .left
+        let center = NSMutableParagraphStyle(); center.alignment = .center
+        let small: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.lightGray, .paragraphStyle: left]
+        let main: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 48, weight: .medium),
+            .foregroundColor: NSColor.white, .paragraphStyle: left]
+        (weather.city as NSString).draw(in: NSRect(x: 8, y: 5, width: 120, height: 18), withAttributes: small)
+        (WeatherMonitor.conditionText(for: weather.weatherCode) as NSString)
+            .draw(in: NSRect(x: 8, y: 23, width: 100, height: 18), withAttributes: small)
+        let aqi = weather.aqi.map { "AQI \($0) \(WeatherMonitor.aqiGrade($0))" } ?? "AQI --"
+        (aqi as NSString).draw(in: NSRect(x: 145, y: 5, width: 88, height: 18), withAttributes: small)
+        ((weather.temperature.map { "\(Int($0.rounded()))°" } ?? "--°") as NSString)
+            .draw(in: NSRect(x: 12, y: 47, width: 145, height: 58), withAttributes: main)
+        let metric = NSMutableParagraphStyle(); metric.alignment = .left
+        let metrics: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.lightGray, .paragraphStyle: metric]
+        func value(_ v: Double?, _ suffix: String = "") -> String { v.map { "\(Int($0.rounded()))\(suffix)" } ?? "--" }
+        let lines = ["体感 \(value(weather.apparentTemperature, "°"))   高/低 \(value(weather.high))/\(value(weather.low))",
+                     "湿度 \(weather.humidity.map(String.init) ?? "--")%   降水 \(weather.precipitationProbability.map(String.init) ?? "--")%",
+                     "\(weather.windDirection)风   \(value(weather.windSpeed, " km/h"))"]
+        for (index, line) in lines.enumerated() {
+            (line as NSString).draw(in: NSRect(x: 12, y: 108 + index * 21, width: 220, height: 18), withAttributes: metrics)
+        }
+        for (index, day) in weather.forecast.prefix(3).enumerated() {
+            let x = CGFloat(4 + index * 78)
+            let text = "\(day.day)\n\(value(day.high))/\(value(day.low))"
+            var attrs = metrics; attrs[.paragraphStyle] = center
+            (text as NSString).draw(in: NSRect(x: x, y: 184, width: 76, height: 46), withAttributes: attrs)
+        }
+        if Date().timeIntervalSince(weather.updatedAt) > 1800 {
+            let warning = metrics.merging([.foregroundColor: NSColor.systemYellow]) { _, new in new }
+            ("!" as NSString).draw(in: NSRect(x: 222, y: 23, width: 12, height: 18), withAttributes: warning)
+        }
     }
 
     private func drawMusicScene(_ ctx: CGContext) {
@@ -438,9 +482,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let netMonitor: NetSpeedMonitor
     private let nowPlaying: NowPlayingMonitor
     private let stockMonitor: StockMonitor
+    private let weatherMonitor: WeatherMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐", "股票"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐", "股票", "天气"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -459,11 +504,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var fetchingSlot: String?
 
     init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor,
-         stockMonitor: StockMonitor) {
+         stockMonitor: StockMonitor, weatherMonitor: WeatherMonitor) {
         self.service = service
         self.netMonitor = netMonitor
         self.nowPlaying = nowPlaying
         self.stockMonitor = stockMonitor
+        self.weatherMonitor = weatherMonitor
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -597,7 +643,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.ensureSprite(info)
                 self.syncBrightness(info)
                 let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3,
-                               "music": 4, "stock": 5][info.mode] ?? 0
+                               "music": 4, "stock": 5, "weather": 6][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
@@ -629,6 +675,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         mirror.netMode = info.effective == "net"
         mirror.musicMode = info.effective == "music"
         mirror.stockMode = info.effective == "stock"
+        mirror.weatherMode = info.effective == "weather"
+        if mirror.weatherMode {
+            mirror.weatherSnapshot = weatherMonitor.snapshot
+            mirror.needsDisplay = true
+            return
+        }
         if mirror.stockMode {
             mirror.stockRows = stockMonitor.snapshot
             mirror.needsDisplay = true
@@ -741,7 +793,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music", "stock"][max(0, modeControl.selectedSegment)]
+        let mode = ["auto", "claude", "codex", "net", "music", "stock", "weather"][max(0, modeControl.selectedSegment)]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

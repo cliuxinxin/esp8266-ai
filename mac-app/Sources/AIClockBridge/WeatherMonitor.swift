@@ -43,6 +43,8 @@ struct WeatherCity: Codable, Equatable {
     let latitude: Double
     let longitude: Double
     let timezone: String
+
+    var displayLabel: String { admin1.isEmpty ? name : "\(name) · \(admin1)" }
 }
 
 struct WeatherSnapshot: Codable, Equatable {
@@ -112,7 +114,7 @@ final class WeatherMonitor {
         self.client = client
         self.nowProvider = now
         self.errorReporter = errorReporter
-        self.currentCity = Self.defaultCity
+        self.currentCity = Self.savedCity() ?? Self.defaultCity
         self.cacheURL = cacheURL ?? Self.defaultCacheURL()
         if let data = try? Data(contentsOf: self.cacheURL),
            let cached = try? JSONDecoder().decode(WeatherSnapshot.self, from: data) {
@@ -138,6 +140,16 @@ final class WeatherMonitor {
         timer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
             Task { await self?.refresh() }
         }
+    }
+
+    var city: WeatherCity { withStateLock { currentCity } }
+
+    func setCity(_ city: WeatherCity) async {
+        withStateLock { currentCity = city }
+        if let data = try? JSONEncoder().encode(city) {
+            UserDefaults.standard.set(data, forKey: "weather_city")
+        }
+        await refresh()
     }
 
     func refresh() async {
@@ -212,6 +224,11 @@ final class WeatherMonitor {
         return base.appendingPathComponent("AIClockBridge/weather-cache.json")
     }
 
+    private static func savedCity() -> WeatherCity? {
+        guard let data = UserDefaults.standard.data(forKey: "weather_city") else { return nil }
+        return try? JSONDecoder().decode(WeatherCity.self, from: data)
+    }
+
     private static func textStrings(for snapshot: WeatherSnapshot) -> [String] {
         let condition = conditionText(for: snapshot.weatherCode)
         let grade = snapshot.aqi.map(aqiGrade) ?? "--"
@@ -259,6 +276,23 @@ final class WeatherMonitor {
             URLQueryItem(name: "timezone", value: city.timezone),
         ]
         return components?.url
+    }
+
+    static func parseCities(data: Data) throws -> [WeatherCity] {
+        try JSONDecoder().decode(GeocodingResponse.self, from: data).results.map {
+            WeatherCity(name: $0.name, admin1: $0.admin1 ?? "", latitude: $0.latitude,
+                        longitude: $0.longitude, timezone: $0.timezone)
+        }
+    }
+
+    func searchCities(query: String) async throws -> [WeatherCity] {
+        var components = URLComponents(string: "https://geocoding-api.open-meteo.com/v1/search")
+        components?.queryItems = [
+            URLQueryItem(name: "name", value: query), URLQueryItem(name: "count", value: "10"),
+            URLQueryItem(name: "language", value: "zh"), URLQueryItem(name: "format", value: "json"),
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try Self.parseCities(data: try await client.data(for: url))
     }
 
     static func renderTextStrips(_ source: [String]) -> Data {
@@ -440,4 +474,15 @@ private struct AirResponse: Decodable {
         }
     }
     let hourly: Hourly
+}
+
+private struct GeocodingResponse: Decodable {
+    struct Result: Decodable {
+        let name: String
+        let latitude: Double
+        let longitude: Double
+        let timezone: String
+        let admin1: String?
+    }
+    let results: [Result]
 }

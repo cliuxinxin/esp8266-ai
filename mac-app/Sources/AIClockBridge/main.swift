@@ -107,7 +107,8 @@ do {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let menuBar = MenuBarController(service: service, usage: usage, netMonitor: netMonitor,
-                                nowPlaying: nowPlaying, stockMonitor: stockMonitor, port: port)
+                                nowPlaying: nowPlaying, stockMonitor: stockMonitor,
+                                weatherMonitor: weatherMonitor, port: port)
 _ = menuBar // retain
 usage.startAutoRefresh()
 app.run()

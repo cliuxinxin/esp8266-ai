@@ -158,4 +158,20 @@ final class WeatherMonitorTests: XCTestCase {
         await monitor.refresh()
         XCTAssertEqual(monitor.snapshot?.temperature, 26)
     }
+
+    func testGeocodingParsesChengduAndKeepsNamesakesDistinct() throws {
+        let data = Data(#"""
+        {"results":[
+          {"name":"成都","latitude":30.66667,"longitude":104.06667,"timezone":"Asia/Shanghai","admin1":"四川"},
+          {"name":"成都","latitude":26.983,"longitude":114.207,"timezone":"Asia/Shanghai","admin1":"江西"}
+        ]}
+        """#.utf8)
+
+        let cities = try WeatherMonitor.parseCities(data: data)
+
+        XCTAssertEqual(cities.count, 2)
+        XCTAssertEqual(cities[0].displayLabel, "成都 · 四川")
+        XCTAssertEqual(cities[0], city)
+        XCTAssertEqual(cities[1].displayLabel, "成都 · 江西")
+    }
 }
