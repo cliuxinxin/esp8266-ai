@@ -65,6 +65,59 @@
 
 日常使用都在托盘图标上：**左键**打开设备画面的实时镜像（底部有屏幕亮度滑条），**右键**是完整菜单（额度详情、屏幕切换、天气城市、更换桌宠、音乐/网速页等）。
 
+### 天气功能
+
+天气功能需要同时更新 **Mac 桥接程序**和 **ESP8266 固件**，并确保两台设备处于同一局域网。
+
+- 右键菜单栏图标 →「屏幕显示」→「天气」：固定显示天气页。
+- 右键菜单栏图标 →「设置天气城市…」：搜索并选择城市，默认为成都。
+- 右键菜单栏图标 →「屏幕显示」→「自动（谁在干活显示谁）」：每 15 分钟自动展示天气约 10 秒。
+- 左键菜单栏图标：打开实时屏幕镜像，也可以从镜像底部切换到天气页。
+
+天气页显示当前温度、体感温度、最高/最低温、湿度、风向风速、降水概率、AQI 和未来三天预报。数据约每 10 分钟更新一次；网络暂时中断时会保留最近一次成功获取的数据。自动模式的显示优先级为：**审批提醒 > AI 工作状态 > 音乐 > 天气 > 空闲**。
+
+### 从源码更新天气版（macOS）
+
+先拉取最新代码：
+
+```bash
+git switch main
+git pull --ff-only origin main
+```
+
+从菜单栏退出正在运行的旧版 AIClockBridge，防止本地服务端口冲突，然后启动新版 Mac 桥接程序：
+
+```bash
+cd mac-app
+swift run
+```
+
+也可以编译并运行优化版：
+
+```bash
+cd mac-app
+swift build -c release
+.build/release/AIClockBridge
+```
+
+首次运行时，请允许 macOS 的本地网络访问权限。天气数据由 Mac 桥接程序从 Open-Meteo 获取，不需要单独申请 API Key。
+
+使用 USB 数据线连接 ESP8266，确认串口后编译并刷写固件：
+
+```bash
+cd firmware
+pio device list
+pio run -t upload
+```
+
+项目默认串口是 `/dev/cu.usbserial-130`。如果你的串口名称不同，可显式指定：
+
+```bash
+pio run -t upload --upload-port /dev/cu.usbserial-你的串口
+```
+
+刷写完成后设备会自动重启。如果设备尚未配网，请连接它创建的 `AI-Clock-Setup` 热点完成 WiFi 配置。
+
 ## 常见问题
 
 - **屏幕边框红色闪烁**：设备连不上桥接程序——确认电脑端程序在运行、和设备在同一 WiFi。
@@ -82,8 +135,9 @@ docs/         开发文档（硬件引脚、HTTP API、架构细节）
 ```
 
 ```bash
-cd firmware && pio run -t upload   # 固件：编译 + USB 烧录
-cd mac-app && swift run            # Mac 桥接：本地跑起来
+(cd firmware && pio run)            # 固件：仅编译
+(cd mac-app && swift test)           # Mac 桥接：运行测试
+(cd mac-app && swift run)            # Mac 桥接：本地运行
 ```
 
 硬件引脚表、屏幕驱动的坑、设备 HTTP API、GIF 板上解码架构等细节见 **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**。
