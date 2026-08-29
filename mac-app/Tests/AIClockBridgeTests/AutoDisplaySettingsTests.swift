@@ -1,6 +1,28 @@
 import XCTest
 @testable import AIClockBridge
 
+private final class TestSettingsPersistence: AutoDisplaySettingsPersistence {
+    private var values: [String: Any] = [:]
+    var rejectedKey: String?
+
+    init(rejectedKey: String? = nil) {
+        self.rejectedKey = rejectedKey
+    }
+
+    func data(forKey key: String) -> Data? {
+        values[key] as? Data
+    }
+
+    func integer(forKey key: String) -> Int {
+        values[key] as? Int ?? 0
+    }
+
+    func set(_ value: Any?, forKey key: String) {
+        guard key != rejectedKey else { return }
+        values[key] = value
+    }
+}
+
 final class AutoDisplaySettingsTests: XCTestCase {
     func testFormValuesRoundTripEveryControlAndNormalizeScheduledNumbers() {
         let values = AutoDisplaySettingsFormValues(
@@ -110,7 +132,7 @@ final class AutoDisplaySettingsTests: XCTestCase {
         configuration.scheduled[.quote] = .init(enabled: true, intervalSeconds: 1, durationSeconds: 999)
         let oldRevision = store.revision
 
-        store.save(configuration)
+        XCTAssertTrue(store.save(configuration))
 
         let reloaded = AutoDisplaySettingsStore(defaults: defaults)
         XCTAssertTrue(reloaded.configuration.events[.claude]!)
@@ -122,6 +144,42 @@ final class AutoDisplaySettingsTests: XCTestCase {
         XCTAssertEqual(storedConfiguration.scheduled[.quote]?.durationSeconds, 60)
         XCTAssertGreaterThan(store.revision, oldRevision)
         XCTAssertEqual(store.jsonObject()["revision"] as? Int, store.revision)
+    }
+
+    func testStoreDoesNotCommitStateWhenRevisionCannotBeReadBack() {
+        let persistence = TestSettingsPersistence(rejectedKey: "auto_display_revision")
+        let store = AutoDisplaySettingsStore(persistence: persistence)
+        let originalConfiguration = store.configuration
+        let originalRevision = store.revision
+        var attemptedConfiguration = originalConfiguration
+        attemptedConfiguration.events[.claude] = true
+
+        let saved = store.save(attemptedConfiguration)
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(store.configuration, originalConfiguration)
+        XCTAssertEqual(store.revision, originalRevision)
+        let reloaded = AutoDisplaySettingsStore(persistence: persistence)
+        XCTAssertEqual(reloaded.configuration, originalConfiguration)
+        XCTAssertEqual(reloaded.revision, originalRevision)
+    }
+
+    func testStoreDoesNotCommitStateWhenConfigurationCannotBeReadBack() {
+        let persistence = TestSettingsPersistence(rejectedKey: "auto_display_configuration_v1")
+        let store = AutoDisplaySettingsStore(persistence: persistence)
+        let originalConfiguration = store.configuration
+        let originalRevision = store.revision
+        var attemptedConfiguration = originalConfiguration
+        attemptedConfiguration.events[.claude] = true
+
+        let saved = store.save(attemptedConfiguration)
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(store.configuration, originalConfiguration)
+        XCTAssertEqual(store.revision, originalRevision)
+        let reloaded = AutoDisplaySettingsStore(persistence: persistence)
+        XCTAssertEqual(reloaded.configuration, originalConfiguration)
+        XCTAssertEqual(reloaded.revision, originalRevision)
     }
 
     func testJSONContainsStableIDKeyedEventAndScheduledObjects() throws {

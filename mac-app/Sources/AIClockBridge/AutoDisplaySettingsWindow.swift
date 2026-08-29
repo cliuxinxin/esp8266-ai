@@ -253,8 +253,7 @@ final class AutoDisplaySettingsWindowController: NSWindowController {
             netDurationSeconds: netDuration.integerValue
         )
         let configuration = values.configuration()
-        store.save(configuration)
-        guard store.configuration == configuration else {
+        guard store.save(configuration) else {
             let alert = NSAlert()
             alert.messageText = "无法保存设置"
             alert.informativeText = "自动显示设置未能写入，请重试。"

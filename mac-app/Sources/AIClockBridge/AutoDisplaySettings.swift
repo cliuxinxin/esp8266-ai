@@ -1,5 +1,13 @@
 import Foundation
 
+protocol AutoDisplaySettingsPersistence: AnyObject {
+    func data(forKey key: String) -> Data?
+    func integer(forKey key: String) -> Int
+    func set(_ value: Any?, forKey key: String)
+}
+
+extension UserDefaults: AutoDisplaySettingsPersistence {}
+
 enum AutoDisplayItemID: String, Codable, CaseIterable {
     case claude, codex, approval, music, weather, quote, stock, net
 }
@@ -43,26 +51,43 @@ final class AutoDisplaySettingsStore {
     private static let configurationKey = "auto_display_configuration_v1"
     private static let revisionKey = "auto_display_revision"
 
-    private let defaults: UserDefaults
+    private let persistence: AutoDisplaySettingsPersistence
     private(set) var configuration: AutoDisplayConfiguration
     private(set) var revision: Int
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        self.configuration = Self.loadConfiguration(from: defaults)
-        self.revision = defaults.integer(forKey: Self.revisionKey)
+    convenience init(defaults: UserDefaults = .standard) {
+        self.init(persistence: defaults)
     }
 
-    func save(_ configuration: AutoDisplayConfiguration) {
+    init(persistence: AutoDisplaySettingsPersistence) {
+        self.persistence = persistence
+        self.configuration = Self.loadConfiguration(from: persistence)
+        self.revision = persistence.integer(forKey: Self.revisionKey)
+    }
+
+    @discardableResult
+    func save(_ configuration: AutoDisplayConfiguration) -> Bool {
         var normalizedConfiguration = configuration
         normalizedConfiguration.normalize()
 
-        guard let data = try? JSONEncoder().encode(normalizedConfiguration) else { return }
+        guard let data = try? JSONEncoder().encode(normalizedConfiguration) else { return false }
+
+        let previousData = persistence.data(forKey: Self.configurationKey)
+        let previousRevision = persistence.integer(forKey: Self.revisionKey)
+        let nextRevision = revision + 1
+        persistence.set(data, forKey: Self.configurationKey)
+        persistence.set(nextRevision, forKey: Self.revisionKey)
+
+        guard persistence.data(forKey: Self.configurationKey) == data,
+              persistence.integer(forKey: Self.revisionKey) == nextRevision else {
+            persistence.set(previousData, forKey: Self.configurationKey)
+            persistence.set(previousRevision, forKey: Self.revisionKey)
+            return false
+        }
 
         self.configuration = normalizedConfiguration
-        defaults.set(data, forKey: Self.configurationKey)
-        revision += 1
-        defaults.set(revision, forKey: Self.revisionKey)
+        revision = nextRevision
+        return true
     }
 
     func jsonObject() -> [String: Any] {
@@ -80,8 +105,8 @@ final class AutoDisplaySettingsStore {
         return ["events": events, "scheduled": scheduled, "revision": revision]
     }
 
-    private static func loadConfiguration(from defaults: UserDefaults) -> AutoDisplayConfiguration {
-        guard let data = defaults.data(forKey: configurationKey),
+    private static func loadConfiguration(from persistence: AutoDisplaySettingsPersistence) -> AutoDisplayConfiguration {
+        guard let data = persistence.data(forKey: configurationKey),
               var configuration = try? JSONDecoder().decode(AutoDisplayConfiguration.self, from: data)
         else {
             return .defaults
