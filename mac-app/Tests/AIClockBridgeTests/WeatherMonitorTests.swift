@@ -1,6 +1,26 @@
 import XCTest
 @testable import AIClockBridge
 
+private actor StubWeatherClient: WeatherHTTPClient {
+    var forecastResult: Result<Data, Error>
+    var airResult: Result<Data, Error>
+
+    init(forecast: Data, air: Data) {
+        forecastResult = .success(forecast)
+        airResult = .success(air)
+    }
+
+    func data(for url: URL) async throws -> Data {
+        if url.host == "api.open-meteo.com" { return try forecastResult.get() }
+        return try airResult.get()
+    }
+
+    func fail() {
+        forecastResult = .failure(URLError(.timedOut))
+        airResult = .failure(URLError(.timedOut))
+    }
+}
+
 final class WeatherMonitorTests: XCTestCase {
     private let city = WeatherCity(name: "成都", admin1: "四川", latitude: 30.66667,
                                    longitude: 104.06667, timezone: "Asia/Shanghai")
@@ -94,5 +114,48 @@ final class WeatherMonitorTests: XCTestCase {
         XCTAssertTrue(fresh["temperature"] is NSNull)
         XCTAssertEqual(fresh["stale"] as? Bool, false)
         XCTAssertEqual(stale["stale"] as? Bool, true)
+    }
+
+    func testForecastURLRequestsAllRequiredFields() throws {
+        let url = try XCTUnwrap(WeatherMonitor.forecastURL(for: city))
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+        XCTAssertEqual(components.host, "api.open-meteo.com")
+        XCTAssertEqual(items["latitude"], "30.66667")
+        XCTAssertEqual(items["longitude"], "104.06667")
+        XCTAssertEqual(items["forecast_days"], "4")
+        XCTAssertEqual(items["timezone"], "Asia/Shanghai")
+        XCTAssertEqual(items["current"], "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m")
+        XCTAssertEqual(items["hourly"], "precipitation_probability")
+        XCTAssertEqual(items["daily"], "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max")
+    }
+
+    func testRenderedTextPayloadHasFixedWireSizeAndCount() {
+        let payload = WeatherMonitor.renderTextStrips(
+            ["成都", "多云", "西南", "优", "明天", "周一", "周二"])
+
+        XCTAssertEqual(payload.count, 51_969)
+        XCTAssertEqual(payload.first, 7)
+        XCTAssertTrue(payload.dropFirst().contains(where: { $0 != 0 }))
+    }
+
+    func testRefreshPublishesSuccessAndRetainsItAfterFailure() async throws {
+        let weather = Data(#"""
+        {"current":{"temperature_2m":26,"relative_humidity_2m":68,"apparent_temperature":27,"weather_code":2,"wind_speed_10m":8,"wind_direction_10m":225},"hourly":{"time":["2026-08-29T14:00"],"precipitation_probability":[35]},"daily":{"time":["2026-08-29","2026-08-30"],"weather_code":[2,61],"temperature_2m_max":[29,25],"temperature_2m_min":[21,19]}}
+        """#.utf8)
+        let air = Data(#"{"hourly":{"time":["2026-08-29T14:00"],"us_aqi":[42]}}"#.utf8)
+        let client = StubWeatherClient(forecast: weather, air: air)
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-29T06:30:00Z"))
+        let monitor = WeatherMonitor(client: client, cacheURL: cache, now: { now }, errorReporter: { _ in })
+
+        await monitor.refresh()
+        XCTAssertEqual(monitor.snapshot?.temperature, 26)
+        XCTAssertEqual(monitor.textRGB565().count, 51_969)
+
+        await client.fail()
+        await monitor.refresh()
+        XCTAssertEqual(monitor.snapshot?.temperature, 26)
     }
 }
