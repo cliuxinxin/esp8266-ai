@@ -112,6 +112,93 @@ void testInvalidRangesAreClampedWithoutMutatingInput() {
   assert(input.scheduled[AUTO_SCHEDULED_WEATHER].intervalSeconds == -20);
 }
 
+void testMissingPatchFieldsUseDefaults() {
+  AutoDisplayConfigPatch patch{};
+  patch.claudeEnabled = AutoConfigField<bool>{true, true};
+  patch.scheduled[AUTO_SCHEDULED_WEATHER].enabled = AutoConfigField<bool>{true, false};
+
+  const AutoDisplayConfig config = applyAutoDisplayConfigPatch(patch);
+
+  assert(config.claudeEnabled);
+  assert(config.codexEnabled);
+  assert(config.musicEnabled);
+  assert(!config.scheduled[AUTO_SCHEDULED_WEATHER].enabled);
+  assert(config.scheduled[AUTO_SCHEDULED_WEATHER].intervalSeconds == 900);
+  assert(config.scheduled[AUTO_SCHEDULED_QUOTE].durationSeconds == 12);
+}
+
+void testInvalidPatchFieldsUseDefaults() {
+  AutoDisplayConfigPatch patch{};
+  patch.musicEnabled = AutoConfigField<bool>{false, false};
+  patch.scheduled[AUTO_SCHEDULED_WEATHER].intervalSeconds = AutoConfigField<int>{false, 1};
+  patch.scheduled[AUTO_SCHEDULED_WEATHER].durationSeconds = AutoConfigField<int>{true, 2};
+
+  const AutoDisplayConfig config = applyAutoDisplayConfigPatch(patch);
+
+  assert(config.musicEnabled);
+  assert(config.scheduled[AUTO_SCHEDULED_WEATHER].intervalSeconds == 900);
+  assert(config.scheduled[AUTO_SCHEDULED_WEATHER].durationSeconds == 5);
+}
+
+void testRepeatedRevisionIsIgnored() {
+  AutoDisplayRuntimeState runtime{};
+  AutoDisplayConfigPatch first{};
+  first.codexEnabled = AutoConfigField<bool>{true, false};
+  assert(applyAutoDisplayRevision(runtime, 7, first));
+  runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs = 1234;
+
+  AutoDisplayConfigPatch repeated{};
+  repeated.codexEnabled = AutoConfigField<bool>{true, true};
+  assert(!applyAutoDisplayRevision(runtime, 7, repeated));
+
+  assert(!runtime.config.codexEnabled);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs == 1234);
+}
+
+void testInterruptedPageRestartsWithFullDuration() {
+  AutoDisplayRuntimeState runtime{};
+  runtime.activeScheduledPage = AUTO_SCHEDULED_WEATHER;
+  runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs = 1000;
+  runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs = 6000;
+
+  AutoTransitionInputs input{};
+  input.nowMs = 2000;
+  input.validMask = AUTO_DUE_WEATHER;
+  input.approvalNeeded = true;
+  assert(advanceAutoDisplay(runtime, input) == AUTO_APPROVAL);
+  assert(runtime.activeScheduledPage == AUTO_SCHEDULED_WEATHER);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs == 1000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 0);
+
+  input.nowMs = 3000;
+  input.approvalNeeded = false;
+  assert(advanceAutoDisplay(runtime, input) == AUTO_WEATHER);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs == 1000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 13000);
+}
+
+void testFixedModeDoesNotRunAutoScheduler() {
+  AutoDisplayRuntimeState runtime{};
+  runtime.activeScheduledPage = AUTO_SCHEDULED_WEATHER;
+  runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs = 1000;
+  runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs = 6000;
+  runtime.scheduled[AUTO_SCHEDULED_WEATHER].lastShownOrder = 3;
+  runtime.lastShownOrder = 3;
+
+  AutoTransitionInputs input{};
+  input.autoMode = false;
+  input.nowMs = 7000;
+  input.validMask = AUTO_DUE_WEATHER;
+  input.approvalNeeded = true;
+
+  assert(advanceAutoDisplay(runtime, input) == AUTO_IDLE);
+  assert(runtime.activeScheduledPage == AUTO_SCHEDULED_WEATHER);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs == 1000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 6000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].lastShownOrder == 3);
+  assert(runtime.lastShownOrder == 3);
+}
+
 int main() {
   testLegacyBridgeDefaults();
   testClaudeCanBeDisabled();
@@ -120,5 +207,10 @@ int main() {
   testAllItemsCanBeDisabled();
   testScheduledValidityMasks();
   testInvalidRangesAreClampedWithoutMutatingInput();
+  testMissingPatchFieldsUseDefaults();
+  testInvalidPatchFieldsUseDefaults();
+  testRepeatedRevisionIsIgnored();
+  testInterruptedPageRestartsWithFullDuration();
+  testFixedModeDoesNotRunAutoScheduler();
   return 0;
 }

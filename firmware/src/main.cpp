@@ -87,11 +87,7 @@ DisplayMode lastEffectiveMode = MODE_AUTO;
 // AUTO configuration is supplied by the Mac bridge. These compiled defaults
 // intentionally match the legacy weather behavior and remain active when an
 // older bridge does not publish auto_display.
-AutoDisplayConfig autoDisplayConfig;
-int autoDisplayRevision = -1;
-ScheduledPageState scheduledPages[AUTO_SCHEDULED_COUNT];
-int activeScheduledPage = -1;
-uint32_t scheduledShowOrder = 0;
+AutoDisplayRuntimeState autoDisplayRuntime;
 
 // ---------- net speed mode state ----------
 // Rendering is decoupled from the network: pollNet() fetches every 2s and
@@ -377,7 +373,7 @@ bool bridgeStale() {
 // True when the app currently on screen is waiting on a permission/approval
 // prompt — drives the red "look now, act" border flash.
 bool currentAppNeedsInput() {
-  if (displayMode == MODE_AUTO && !autoDisplayConfig.approvalEnabled) return false;
+  if (displayMode == MODE_AUTO && !autoDisplayRuntime.config.approvalEnabled) return false;
   return currentApp == APP_CLAUDE ? claudeStatus.needsInput : codexStatus.needsInput;
 }
 
@@ -914,7 +910,7 @@ void redrawRingOnly() {
 bool updateActiveApp() {
   ActiveApp desired = currentApp;
   const bool autoMode = displayMode == MODE_AUTO;
-  const bool approvalsEnabled = !autoMode || autoDisplayConfig.approvalEnabled;
+  const bool approvalsEnabled = !autoMode || autoDisplayRuntime.config.approvalEnabled;
 
   if (displayMode == MODE_CLAUDE) {
     desired = APP_CLAUDE;
@@ -925,8 +921,10 @@ bool updateActiveApp() {
   } else if (approvalsEnabled && codexStatus.needsInput && !claudeStatus.needsInput) {
     desired = APP_CODEX;
   } else {
-    bool claudeWorking = claudeStatus.status == "working" && (!autoMode || autoDisplayConfig.claudeEnabled);
-    bool codexWorking = codexStatus.status == "working" && (!autoMode || autoDisplayConfig.codexEnabled);
+    bool claudeWorking =
+        claudeStatus.status == "working" && (!autoMode || autoDisplayRuntime.config.claudeEnabled);
+    bool codexWorking =
+        codexStatus.status == "working" && (!autoMode || autoDisplayRuntime.config.codexEnabled);
     if (claudeWorking && !codexWorking) {
       desired = APP_CLAUDE;
     } else if (codexWorking && !claudeWorking) {
@@ -1669,27 +1667,23 @@ void setupWiFi() {
   Serial.printf("[wifi] bridge host = '%s'\n", bridgeHost.c_str());
 }
 
-void resetAutoDisplaySchedule() {
-  for (int i = 0; i < AUTO_SCHEDULED_COUNT; ++i) scheduledPages[i] = ScheduledPageState{};
-  activeScheduledPage = -1;
-  scheduledShowOrder = 0;
-}
-
-void readAutoEventSetting(JsonObject object, const char *key, bool &target) {
+void readAutoEventSetting(JsonObject object, const char *key, AutoConfigField<bool> &target) {
   JsonVariant value = object[key];
-  if (value.is<bool>()) target = value.as<bool>();
+  if (value.is<bool>()) target = AutoConfigField<bool>{true, value.as<bool>()};
 }
 
-void readAutoScheduledSetting(JsonObject object, const char *key, AutoScheduledSetting &target) {
+void readAutoScheduledSetting(JsonObject object, const char *key, AutoScheduledConfigPatch &target) {
   JsonVariant value = object[key];
   if (!value.is<JsonObject>()) return;
   JsonObject setting = value.as<JsonObject>();
-  if (setting["enabled"].is<bool>()) target.enabled = setting["enabled"].as<bool>();
+  if (setting["enabled"].is<bool>()) {
+    target.enabled = AutoConfigField<bool>{true, setting["enabled"].as<bool>()};
+  }
   if (setting["interval_seconds"].is<int>()) {
-    target.intervalSeconds = setting["interval_seconds"].as<int>();
+    target.intervalSeconds = AutoConfigField<int>{true, setting["interval_seconds"].as<int>()};
   }
   if (setting["duration_seconds"].is<int>()) {
-    target.durationSeconds = setting["duration_seconds"].as<int>();
+    target.durationSeconds = AutoConfigField<int>{true, setting["duration_seconds"].as<int>()};
   }
 }
 
@@ -1701,29 +1695,27 @@ void applyAutoDisplayConfig(JsonVariant value) {
   JsonObject object = value.as<JsonObject>();
   if (!object["revision"].is<int>()) return;
   int revision = object["revision"].as<int>();
-  if (revision == autoDisplayRevision) return;
+  if (revision == autoDisplayRuntime.revision) return;
 
-  AutoDisplayConfig next;
+  AutoDisplayConfigPatch patch;
   JsonVariant eventsValue = object["events"];
   if (eventsValue.is<JsonObject>()) {
     JsonObject events = eventsValue.as<JsonObject>();
-    readAutoEventSetting(events, "claude", next.claudeEnabled);
-    readAutoEventSetting(events, "codex", next.codexEnabled);
-    readAutoEventSetting(events, "approval", next.approvalEnabled);
-    readAutoEventSetting(events, "music", next.musicEnabled);
+    readAutoEventSetting(events, "claude", patch.claudeEnabled);
+    readAutoEventSetting(events, "codex", patch.codexEnabled);
+    readAutoEventSetting(events, "approval", patch.approvalEnabled);
+    readAutoEventSetting(events, "music", patch.musicEnabled);
   }
   JsonVariant scheduledValue = object["scheduled"];
   if (scheduledValue.is<JsonObject>()) {
     JsonObject scheduled = scheduledValue.as<JsonObject>();
-    readAutoScheduledSetting(scheduled, "weather", next.scheduled[AUTO_SCHEDULED_WEATHER]);
-    readAutoScheduledSetting(scheduled, "quote", next.scheduled[AUTO_SCHEDULED_QUOTE]);
-    readAutoScheduledSetting(scheduled, "stock", next.scheduled[AUTO_SCHEDULED_STOCK]);
-    readAutoScheduledSetting(scheduled, "net", next.scheduled[AUTO_SCHEDULED_NET]);
+    readAutoScheduledSetting(scheduled, "weather", patch.scheduled[AUTO_SCHEDULED_WEATHER]);
+    readAutoScheduledSetting(scheduled, "quote", patch.scheduled[AUTO_SCHEDULED_QUOTE]);
+    readAutoScheduledSetting(scheduled, "stock", patch.scheduled[AUTO_SCHEDULED_STOCK]);
+    readAutoScheduledSetting(scheduled, "net", patch.scheduled[AUTO_SCHEDULED_NET]);
   }
 
-  autoDisplayConfig = normalizeAutoDisplayConfig(next);
-  autoDisplayRevision = revision;
-  resetAutoDisplaySchedule();
+  applyAutoDisplayRevision(autoDisplayRuntime, revision, patch);
 }
 
 bool parseStatusJson(const String &payload) {
@@ -1759,14 +1751,6 @@ bool parseStatusJson(const String &payload) {
   return true;
 }
 
-bool autoDeadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
-  return deadlineMs != 0 && static_cast<int32_t>(nowMs - deadlineMs) >= 0;
-}
-
-uint32_t autoMilliseconds(int seconds) {
-  return static_cast<uint32_t>(seconds) * 1000U;
-}
-
 uint8_t autoScheduledValidityMask() {
   uint8_t mask = 0;
   if (weather.valid) mask |= AUTO_DUE_WEATHER;
@@ -1777,107 +1761,28 @@ uint8_t autoScheduledValidityMask() {
   return mask;
 }
 
-void initializeAutoDueTimes(uint32_t nowMs, uint8_t validMask) {
-  for (int i = 0; i < AUTO_SCHEDULED_COUNT; ++i) {
-    const uint8_t bit = autoDueBitForScheduledPage(i);
-    if (autoDisplayConfig.scheduled[i].enabled && (validMask & bit) && scheduledPages[i].dueMs == 0) {
-      scheduledPages[i].dueMs = nowMs + autoMilliseconds(autoDisplayConfig.scheduled[i].intervalSeconds);
-    }
-  }
-}
-
-AutoSelectionInputs autoSelectionInputs(uint8_t validMask, uint8_t dueMask = 0) {
-  AutoSelectionInputs input;
-  input.config = autoDisplayConfig;
+// The mode actually rendered. Fixed modes bypass this state machine. AUTO
+// checks events first, then resumes any interrupted page, then fairly selects
+// the oldest valid due page.
+DisplayMode effectiveMode() {
+  AutoTransitionInputs input;
+  input.autoMode = displayMode == MODE_AUTO;
+  input.nowMs = millis();
   input.approvalNeeded = claudeStatus.needsInput || codexStatus.needsInput;
   input.claudeWorking = claudeStatus.status == "working";
   input.codexWorking = codexStatus.status == "working";
   // The music page needs HTTP for its cover/text bitmaps, so wired-only mode
   // does not auto-promote it.
   input.musicPlaying = statusMusicPlaying && WiFi.status() == WL_CONNECTED;
-  input.validMask = validMask;
-  input.dueMask = dueMask;
-  input.lastShownWeather = scheduledPages[AUTO_SCHEDULED_WEATHER].lastShownOrder;
-  input.lastShownQuote = scheduledPages[AUTO_SCHEDULED_QUOTE].lastShownOrder;
-  input.lastShownStock = scheduledPages[AUTO_SCHEDULED_STOCK].lastShownOrder;
-  input.lastShownNet = scheduledPages[AUTO_SCHEDULED_NET].lastShownOrder;
-  return input;
-}
+  input.validMask = autoScheduledValidityMask();
 
-int scheduledPageForAutoChoice(AutoDisplayChoice choice) {
-  if (choice == AUTO_WEATHER) return AUTO_SCHEDULED_WEATHER;
-  if (choice == AUTO_QUOTE) return AUTO_SCHEDULED_QUOTE;
-  if (choice == AUTO_STOCK) return AUTO_SCHEDULED_STOCK;
-  if (choice == AUTO_NET) return AUTO_SCHEDULED_NET;
-  return -1;
-}
-
-DisplayMode displayModeForScheduledPage(int page) {
-  if (page == AUTO_SCHEDULED_WEATHER) return MODE_WEATHER;
-  if (page == AUTO_SCHEDULED_STOCK) return MODE_STOCK;
-  if (page == AUTO_SCHEDULED_NET) return MODE_NET;
-  return MODE_AUTO;
-}
-
-// The mode actually rendered. Fixed modes bypass this state machine. AUTO
-// checks events first, then resumes any interrupted page, then fairly selects
-// the oldest valid due page.
-DisplayMode effectiveMode() {
-  if (displayMode != MODE_AUTO) {
-    if (activeScheduledPage >= 0) scheduledPages[activeScheduledPage].untilMs = 0;
-    return displayMode;
-  }
-
-  const uint32_t nowMs = millis();
-  const uint8_t validMask = autoScheduledValidityMask();
-  initializeAutoDueTimes(nowMs, validMask);
-
-  if (activeScheduledPage >= 0) {
-    ScheduledPageState &active = scheduledPages[activeScheduledPage];
-    if (active.untilMs != 0 && autoDeadlineReached(nowMs, active.untilMs)) {
-      active.untilMs = 0;
-      active.dueMs = nowMs + autoMilliseconds(autoDisplayConfig.scheduled[activeScheduledPage].intervalSeconds);
-      activeScheduledPage = -1;
-    }
-  }
-
-  const AutoDisplayChoice eventChoice = chooseAutoDisplay(autoSelectionInputs(validMask));
-  if (eventChoice == AUTO_APPROVAL || eventChoice == AUTO_CLAUDE || eventChoice == AUTO_CODEX ||
-      eventChoice == AUTO_MUSIC) {
-    if (activeScheduledPage >= 0) {
-      // Keep dueMs and activeScheduledPage so this exact page resumes later.
-      scheduledPages[activeScheduledPage].untilMs = 0;
-    }
-    return eventChoice == AUTO_MUSIC ? MODE_MUSIC : MODE_AUTO;
-  }
-
-  if (activeScheduledPage >= 0) {
-    const uint8_t activeBit = autoDueBitForScheduledPage(activeScheduledPage);
-    if (autoDisplayConfig.scheduled[activeScheduledPage].enabled && (validMask & activeBit)) {
-      ScheduledPageState &active = scheduledPages[activeScheduledPage];
-      if (active.untilMs == 0) {
-        active.untilMs = nowMs + autoMilliseconds(autoDisplayConfig.scheduled[activeScheduledPage].durationSeconds);
-        active.lastShownOrder = ++scheduledShowOrder;
-      }
-      return displayModeForScheduledPage(activeScheduledPage);
-    }
-    scheduledPages[activeScheduledPage].untilMs = 0;
-    activeScheduledPage = -1;
-  }
-
-  uint8_t dueMask = 0;
-  for (int i = 0; i < AUTO_SCHEDULED_COUNT; ++i) {
-    if (autoDeadlineReached(nowMs, scheduledPages[i].dueMs)) dueMask |= autoDueBitForScheduledPage(i);
-  }
-  const AutoDisplayChoice scheduledChoice = chooseAutoDisplay(autoSelectionInputs(validMask, dueMask));
-  const int selectedPage = scheduledPageForAutoChoice(scheduledChoice);
-  if (selectedPage >= 0) {
-    activeScheduledPage = selectedPage;
-    ScheduledPageState &selected = scheduledPages[selectedPage];
-    selected.untilMs = nowMs + autoMilliseconds(autoDisplayConfig.scheduled[selectedPage].durationSeconds);
-    selected.lastShownOrder = ++scheduledShowOrder;
-    return displayModeForScheduledPage(selectedPage);
-  }
+  const AutoDisplayChoice choice = advanceAutoDisplay(autoDisplayRuntime, input);
+  if (!input.autoMode) return displayMode;
+  if (choice == AUTO_MUSIC) return MODE_MUSIC;
+  if (choice == AUTO_WEATHER) return MODE_WEATHER;
+  if (choice == AUTO_STOCK) return MODE_STOCK;
+  if (choice == AUTO_NET) return MODE_NET;
+  // AUTO_QUOTE remains invalid until Task 6 supplies its data/display path.
   return MODE_AUTO;
 }
 
@@ -2576,12 +2481,12 @@ void loop() {
   // Prime scheduled pages that do not arrive in /status. Once a first valid
   // payload is cached, their normal per-mode poll loops keep them fresh.
   if (WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 && displayMode == MODE_AUTO) {
-    if (autoDisplayConfig.scheduled[AUTO_SCHEDULED_STOCK].enabled && !stockEverLoaded &&
+    if (autoDisplayRuntime.config.scheduled[AUTO_SCHEDULED_STOCK].enabled && !stockEverLoaded &&
         (lastStockPollMs == 0 || nowMs - lastStockPollMs >= STOCK_POLL_INTERVAL_MS)) {
       lastStockPollMs = nowMs;
       pollStock();
     }
-    if (autoDisplayConfig.scheduled[AUTO_SCHEDULED_NET].enabled && !netEverLoaded &&
+    if (autoDisplayRuntime.config.scheduled[AUTO_SCHEDULED_NET].enabled && !netEverLoaded &&
         (lastNetPollMs == 0 || nowMs - lastNetPollMs >= NET_POLL_INTERVAL_MS)) {
       lastNetPollMs = nowMs;
       pollNet();
@@ -2643,9 +2548,9 @@ void loop() {
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
       lastAnimMs = nowMs;
       bool claudeWorking = claudeStatus.status == "working" &&
-                           (displayMode != MODE_AUTO || autoDisplayConfig.claudeEnabled);
+                           (displayMode != MODE_AUTO || autoDisplayRuntime.config.claudeEnabled);
       bool codexWorking = codexStatus.status == "working" &&
-                          (displayMode != MODE_AUTO || autoDisplayConfig.codexEnabled);
+                          (displayMode != MODE_AUTO || autoDisplayRuntime.config.codexEnabled);
       if (showingCd != CD_NONE) {
         // countdown owns the center area: no sprite frames over it
       } else if (currentApp == APP_CLAUDE && claudeWorking) {
