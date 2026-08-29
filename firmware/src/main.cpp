@@ -18,6 +18,7 @@
 
 #include "auto_display_logic.h"
 #include "config.h"
+#include "quote_transport_logic.h"
 #include "weather_logic.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
@@ -200,7 +201,7 @@ QuoteState quote;
 unsigned long lastQuotePollMs = 0;
 bool quoteDirty = false;
 bool quoteScreenDrawn = false;
-bool quoteBitmapFetchable = false;
+QuoteBitmapFetchState quoteBitmapFetchState;
 int quoteTextDrawnRev = -1;
 // CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
 // 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
@@ -1659,7 +1660,7 @@ void pollWeather() {
 // HTTP /quote and serial #QUOTE both enter through this parser. Build a
 // complete replacement first so malformed/unavailable polls never destroy a
 // previously usable quote.
-bool handleQuotePayload(const String &payload) {
+bool handleQuotePayload(const String &payload, QuoteMetadataTransport transport) {
   JsonDocument doc;
   if (deserializeJson(doc, payload) ||
       (doc["available"].is<bool>() && !doc["available"].as<bool>())) {
@@ -1684,16 +1685,17 @@ bool handleQuotePayload(const String &payload) {
   const bool changed = !quote.valid || next.textRev != quote.textRev;
   quote = next;
   quoteDirty = quoteDirty || changed;
-  // A fresh, valid metadata poll permits a retry after a prior raw transfer
-  // failure. Actual mode entry still requires WiFi and a configured bridge.
-  quoteBitmapFetchable = true;
+  // Serial proves only that metadata can arrive over USB. It never changes
+  // the separately tracked HTTP reachability or bitmap retry deadline.
+  noteQuoteMetadataReceived(quoteBitmapFetchState, transport);
   return true;
 }
 
 bool quoteCanEnterMode() {
   if (!quote.valid || quote.textRev < 0) return false;
   if (quoteScreenDrawn && quoteTextDrawnRev == quote.textRev) return true;
-  return quoteBitmapFetchable && WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0;
+  return WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
+         quoteBitmapFetchAllowed(quoteBitmapFetchState, millis());
 }
 
 // The quote page is exactly one 240x240 RGB565 frame. Stream one 480-byte row
@@ -1701,7 +1703,8 @@ bool quoteCanEnterMode() {
 // 115,200 bytes and cannot fit in ESP8266 RAM.
 bool drawQuoteScreen() {
   if (quoteScreenDrawn && quoteTextDrawnRev == quote.textRev && !quoteDirty) return true;
-  if (!quote.valid || quote.textRev < 0 || WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
+  if (!quote.valid || quote.textRev < 0 || WiFi.status() != WL_CONNECTED ||
+      bridgeHost.length() == 0 || !quoteBitmapFetchAllowed(quoteBitmapFetchState, millis())) {
     return false;
   }
 
@@ -1709,14 +1712,14 @@ bool drawQuoteScreen() {
   HTTPClient http;
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, "http://" + bridgeHost + "/quote/text.raw")) {
-    quoteBitmapFetchable = false;
+    noteQuoteBitmapFetchFailure(quoteBitmapFetchState, millis());
     quoteScreenDrawn = false;
     return false;
   }
   const int expectedBytes = SCREEN_W * SCREEN_H * 2;
   if (http.GET() != HTTP_CODE_OK || http.getSize() != expectedBytes) {
     http.end();
-    quoteBitmapFetchable = false;
+    noteQuoteBitmapFetchFailure(quoteBitmapFetchState, millis());
     quoteScreenDrawn = false;
     return false;
   }
@@ -1734,9 +1737,12 @@ bool drawQuoteScreen() {
     yield();
   }
   http.end();
-  quoteBitmapFetchable = ok;
-  if (!ok) return false;
+  if (!ok) {
+    noteQuoteBitmapFetchFailure(quoteBitmapFetchState, millis());
+    return false;
+  }
 
+  noteQuoteBitmapFetchSuccess(quoteBitmapFetchState);
   quoteScreenDrawn = true;
   quoteTextDrawnRev = quote.textRev;
   quoteDirty = false;
@@ -1748,8 +1754,16 @@ void pollQuote() {
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, "http://" + bridgeHost + "/quote")) return;
-  if (http.GET() == HTTP_CODE_OK) handleQuotePayload(http.getString());
+  if (!http.begin(client, "http://" + bridgeHost + "/quote")) {
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+    return;
+  }
+  if (http.GET() == HTTP_CODE_OK) {
+    noteQuoteHTTPReachable(quoteBitmapFetchState);
+    handleQuotePayload(http.getString(), QUOTE_METADATA_HTTP);
+  } else {
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+  }
   http.end();
 }
 
@@ -1918,8 +1932,19 @@ DisplayMode effectiveMode() {
   return MODE_AUTO;
 }
 
+void scheduledModeBecameVisible(DisplayMode mode) {
+  if (displayMode != MODE_AUTO) return;
+  AutoDisplayChoice choice = AUTO_IDLE;
+  if (mode == MODE_WEATHER) choice = AUTO_WEATHER;
+  else if (mode == MODE_QUOTE) choice = AUTO_QUOTE;
+  else if (mode == MODE_STOCK) choice = AUTO_STOCK;
+  else if (mode == MODE_NET) choice = AUTO_NET;
+  if (choice != AUTO_IDLE) autoScheduledPageBecameVisible(autoDisplayRuntime, choice, millis());
+}
+
 void pollBridge() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
     Serial.printf("[bridge] skip poll: wifi=%d host='%s'\n", WiFi.status() == WL_CONNECTED, bridgeHost.c_str());
     return;
   }
@@ -1930,12 +1955,14 @@ void pollBridge() {
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
 
   if (!http.begin(client, url)) {
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
     Serial.println("[bridge] http.begin() failed");
     return;
   }
   int code = http.GET();
   Serial.printf("[bridge] GET %s -> %d\n", url.c_str(), code);
   if (code == HTTP_CODE_OK) {
+    noteQuoteHTTPReachable(quoteBitmapFetchState);
     String payload = http.getString();
     if (parseStatusJson(payload)) {
       lastSuccessMs = millis();
@@ -1947,6 +1974,7 @@ void pollBridge() {
       Serial.println("[bridge] JSON parse failed");
     }
   } else {
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
     claudeStatus.status = "offline";
     codexStatus.status = "offline";
   }
@@ -2015,7 +2043,7 @@ void handleSerialFrame(char *line) {
     return;
   }
   if (!strncmp(line, "#QUOTE ", 7)) {
-    handleQuotePayload(String(line + 7));
+    handleQuotePayload(String(line + 7), QUOTE_METADATA_SERIAL);
     return;
   }
   if (!strncmp(line, "#CMD ", 5)) {
@@ -2163,6 +2191,7 @@ void handleRoot() {
 void handleSave() {
   String newHost = webServer.arg("bridge");
   newHost.trim();
+  if (newHost != bridgeHost) resetQuoteBitmapFetchState(quoteBitmapFetchState);
   bridgeHost = newHost;
   saveBridgeHost(bridgeHost);
   Serial.printf("[web] bridge host updated to '%s'\n", bridgeHost.c_str());
@@ -2279,6 +2308,7 @@ void handleApiBridge() {
     webServer.send(400, "text/plain", "missing host");
     return;
   }
+  if (newHost != bridgeHost) resetQuoteBitmapFetchState(quoteBitmapFetchState);
   bridgeHost = newHost;
   saveBridgeHost(bridgeHost);
   Serial.printf("[api] bridge host = '%s'\n", bridgeHost.c_str());
@@ -2647,9 +2677,14 @@ void loop() {
     lastWeatherPollMs = nowMs;
     pollWeather();
   }
-  if (WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
-      (displayMode == MODE_AUTO || displayMode == MODE_QUOTE) &&
-      (lastQuotePollMs == 0 || nowMs - lastQuotePollMs >= QUOTE_POLL_INTERVAL_MS)) {
+  QuoteMetadataPollInputs quotePollInputs;
+  quotePollInputs.wifiConnected = WiFi.status() == WL_CONNECTED;
+  quotePollInputs.bridgeConfigured = bridgeHost.length() > 0;
+  quotePollInputs.modeNeedsQuote = displayMode == MODE_AUTO || displayMode == MODE_QUOTE;
+  quotePollInputs.intervalElapsed =
+      lastQuotePollMs == 0 || nowMs - lastQuotePollMs >= QUOTE_POLL_INTERVAL_MS;
+  quotePollInputs.wiredActive = wiredActive();
+  if (shouldPollQuoteMetadataHTTP(quotePollInputs)) {
     lastQuotePollMs = nowMs;
     pollQuote();
   }
@@ -2673,13 +2708,16 @@ void loop() {
   // audio plays). On a transition, reset the incoming mode's chrome so it
   // repaints cleanly, and repaint the pet immediately when returning to it.
   DisplayMode eff = effectiveMode();
-  if (eff == MODE_QUOTE && lastEffectiveMode != MODE_QUOTE && !drawQuoteScreen()) {
-    // drawQuoteScreen marks this revision temporarily unfetchable. Re-run the
-    // scheduler so AUTO can choose another due page (or a fixed quote can keep
-    // showing the pet), and force the normal transition repaint in case a
-    // short body had already overwritten some rows.
-    eff = effectiveMode();
-    lastEffectiveMode = MODE_QUOTE;
+  if (eff == MODE_QUOTE && lastEffectiveMode != MODE_QUOTE) {
+    if (drawQuoteScreen()) {
+      scheduledModeBecameVisible(MODE_QUOTE);
+    } else {
+      // The failed transfer starts a bounded retry delay. Re-run the scheduler
+      // so AUTO can choose another due page (or a fixed quote can keep showing
+      // the pet), and repaint if a short body had overwritten some rows.
+      eff = effectiveMode();
+      lastEffectiveMode = MODE_QUOTE;
+    }
   }
   if (eff != lastEffectiveMode) {
     if (lastEffectiveMode == MODE_QUOTE) quoteScreenDrawn = false;
@@ -2711,6 +2749,7 @@ void loop() {
       lastNetDrawMs = nowMs;
       netDrawTick();
     }
+    if (netChromeDrawn) scheduledModeBecameVisible(MODE_NET);
     if (nowMs - lastNetPollMs >= NET_POLL_INTERVAL_MS) {
       lastNetPollMs = nowMs;
       pollNet();
@@ -2728,10 +2767,17 @@ void loop() {
       if (!wiredActive()) pollStock();
     }
     if (!stockChromeDrawn || stockDirty) drawStockScreen();
+    if (stockChromeDrawn) scheduledModeBecameVisible(MODE_STOCK);
   } else if (eff == MODE_WEATHER) {
     if (!weatherChromeDrawn || weatherDirty) drawWeatherScreen();
+    if (weatherChromeDrawn) scheduledModeBecameVisible(MODE_WEATHER);
   } else if (eff == MODE_QUOTE) {
-    if (!quoteScreenDrawn || quoteDirty || quoteTextDrawnRev != quote.textRev) drawQuoteScreen();
+    if ((!quoteScreenDrawn || quoteDirty || quoteTextDrawnRev != quote.textRev) &&
+        !drawQuoteScreen()) {
+      // effectiveMode() will leave quote while this revision is backed off.
+    } else {
+      scheduledModeBecameVisible(MODE_QUOTE);
+    }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {

@@ -1,6 +1,7 @@
 #include <cassert>
 
 #include "auto_display_logic.h"
+#include "quote_transport_logic.h"
 
 void testLegacyBridgeDefaults() {
   const AutoDisplayConfig config{};
@@ -185,7 +186,77 @@ void testInterruptedPageRestartsWithFullDuration() {
   input.approvalNeeded = false;
   assert(advanceAutoDisplay(runtime, input) == AUTO_WEATHER);
   assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs == 1000);
-  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 13000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 0);
+
+  // A slow redraw after the interruption must not consume display time.
+  assert(autoScheduledPageBecameVisible(runtime, AUTO_WEATHER, 5000));
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 15000);
+  assert(!autoScheduledPageBecameVisible(runtime, AUTO_WEATHER, 6000));
+  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 15000);
+}
+
+void testScheduledDeadlineStartsAfterFirstSuccessfulDraw() {
+  AutoDisplayRuntimeState runtime{};
+  runtime.scheduled[AUTO_SCHEDULED_QUOTE].dueMs = 1000;
+
+  AutoTransitionInputs input{};
+  input.nowMs = 1000;
+  input.validMask = AUTO_DUE_QUOTE;
+  assert(advanceAutoDisplay(runtime, input) == AUTO_QUOTE);
+  assert(runtime.activeScheduledPage == AUTO_SCHEDULED_QUOTE);
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].untilMs == 0);
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].lastShownOrder == 0);
+
+  // Simulate a three-second bitmap transfer before the first visible pixel.
+  assert(autoScheduledPageBecameVisible(runtime, AUTO_QUOTE, 4000));
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].untilMs == 16000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].lastShownOrder == 1);
+
+  input.nowMs = 15999;
+  assert(advanceAutoDisplay(runtime, input) == AUTO_QUOTE);
+  input.nowMs = 16000;
+  assert(advanceAutoDisplay(runtime, input) == AUTO_IDLE);
+}
+
+void testSerialMetadataCannotConfirmOrResetHTTPBitmapTransport() {
+  QuoteBitmapFetchState state{};
+
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_SERIAL);
+  assert(!quoteBitmapFetchAllowed(state, 100));
+
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_HTTP);
+  assert(quoteBitmapFetchAllowed(state, 100));
+  noteQuoteBitmapFetchFailure(state, 100);
+  const uint32_t retryAfter = state.retryAfterMs;
+  assert(!quoteBitmapFetchAllowed(state, retryAfter - 1));
+
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_SERIAL);
+  assert(state.failureCount == 1);
+  assert(state.retryAfterMs == retryAfter);
+  assert(!quoteBitmapFetchAllowed(state, retryAfter - 1));
+  assert(quoteBitmapFetchAllowed(state, retryAfter));
+
+  noteQuoteBitmapFetchSuccess(state);
+  assert(state.failureCount == 0);
+  assert(state.retryAfterMs == 0);
+  assert(quoteBitmapFetchAllowed(state, retryAfter));
+
+  resetQuoteBitmapFetchState(state);
+  noteQuoteHTTPReachable(state);
+  assert(quoteBitmapFetchAllowed(state, retryAfter));
+}
+
+void testQuoteMetadataHTTPPollIsSkippedWhileWiredTransportIsActive() {
+  QuoteMetadataPollInputs input{};
+  input.wifiConnected = true;
+  input.bridgeConfigured = true;
+  input.modeNeedsQuote = true;
+  input.intervalElapsed = true;
+  input.wiredActive = true;
+  assert(!shouldPollQuoteMetadataHTTP(input));
+
+  input.wiredActive = false;
+  assert(shouldPollQuoteMetadataHTTP(input));
 }
 
 void testFixedModeDoesNotRunAutoScheduler() {
@@ -224,6 +295,9 @@ int main() {
   testInvalidPatchFieldsUseDefaults();
   testRepeatedRevisionIsIgnored();
   testInterruptedPageRestartsWithFullDuration();
+  testScheduledDeadlineStartsAfterFirstSuccessfulDraw();
+  testSerialMetadataCannotConfirmOrResetHTTPBitmapTransport();
+  testQuoteMetadataHTTPPollIsSkippedWhileWiredTransportIsActive();
   testFixedModeDoesNotRunAutoScheduler();
   return 0;
 }

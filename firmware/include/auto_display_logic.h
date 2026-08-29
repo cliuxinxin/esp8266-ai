@@ -223,6 +223,20 @@ inline int scheduledPageForAutoChoice(AutoDisplayChoice choice) {
   return -1;
 }
 
+// The scheduler selects a due page before the renderer may perform blocking
+// transfers. Start (or restart after interruption) its full duration only
+// once the first complete page is actually visible.
+inline bool autoScheduledPageBecameVisible(AutoDisplayRuntimeState &runtime,
+                                           AutoDisplayChoice choice, uint32_t nowMs) {
+  const int page = scheduledPageForAutoChoice(choice);
+  if (page < 0 || runtime.activeScheduledPage != page) return false;
+  ScheduledPageState &state = runtime.scheduled[page];
+  if (state.untilMs != 0) return false;
+  state.untilMs = nowMs + autoMilliseconds(runtime.config.scheduled[page].durationSeconds);
+  state.lastShownOrder = ++runtime.lastShownOrder;
+  return true;
+}
+
 inline AutoDisplayChoice advanceAutoDisplay(AutoDisplayRuntimeState &runtime,
                                             const AutoTransitionInputs &input) {
   if (!input.autoMode) return AUTO_IDLE;
@@ -262,11 +276,6 @@ inline AutoDisplayChoice advanceAutoDisplay(AutoDisplayRuntimeState &runtime,
     const int page = runtime.activeScheduledPage;
     const uint8_t activeBit = autoDueBitForScheduledPage(page);
     if (runtime.config.scheduled[page].enabled && (input.validMask & activeBit)) {
-      ScheduledPageState &active = runtime.scheduled[page];
-      if (active.untilMs == 0) {
-        active.untilMs = input.nowMs + autoMilliseconds(runtime.config.scheduled[page].durationSeconds);
-        active.lastShownOrder = ++runtime.lastShownOrder;
-      }
       return autoChoiceForScheduledPage(page);
     }
     runtime.scheduled[page].untilMs = 0;
@@ -284,9 +293,6 @@ inline AutoDisplayChoice advanceAutoDisplay(AutoDisplayRuntimeState &runtime,
   const int selectedPage = scheduledPageForAutoChoice(scheduledChoice);
   if (selectedPage >= 0) {
     runtime.activeScheduledPage = selectedPage;
-    ScheduledPageState &selected = runtime.scheduled[selectedPage];
-    selected.untilMs = input.nowMs + autoMilliseconds(runtime.config.scheduled[selectedPage].durationSeconds);
-    selected.lastShownOrder = ++runtime.lastShownOrder;
   }
   return scheduledChoice;
 }
