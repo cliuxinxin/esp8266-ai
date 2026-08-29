@@ -104,6 +104,7 @@ final class WeatherMonitor {
     private var storedSnapshot: WeatherSnapshot?
     private var storedText = Data([0])
     private var refreshInFlight = false
+    private var refreshPending = false
     private var timer: Timer?
 
     init(client: WeatherHTTPClient = URLSessionWeatherClient(), cacheURL: URL? = nil,
@@ -154,9 +155,8 @@ final class WeatherMonitor {
 
     func refresh() async {
         guard let city = beginRefresh() else { return }
-        defer { endRefresh() }
-        guard let forecastURL = Self.forecastURL(for: city), let airURL = Self.airQualityURL(for: city) else { return }
-        do {
+        if let forecastURL = Self.forecastURL(for: city), let airURL = Self.airQualityURL(for: city) {
+          do {
             async let forecastRequest = client.data(for: forecastURL)
             async let airRequest = client.data(for: airURL)
             let (forecastData, airData) = try await (forecastRequest, airRequest)
@@ -180,9 +180,11 @@ final class WeatherMonitor {
                 storedText = rendered
             }
             persist(parsed)
-        } catch {
-            errorReporter(error)
+          } catch {
+              errorReporter(error)
+          }
         }
+        if finishRefresh() { await refresh() }
     }
 
     private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
@@ -192,14 +194,19 @@ final class WeatherMonitor {
 
     private func beginRefresh() -> WeatherCity? {
         withStateLock {
-            guard !refreshInFlight else { return nil }
+            guard !refreshInFlight else { refreshPending = true; return nil }
             refreshInFlight = true
             return currentCity
         }
     }
 
-    private func endRefresh() {
-        withStateLock { refreshInFlight = false }
+    private func finishRefresh() -> Bool {
+        withStateLock {
+            refreshInFlight = false
+            let pending = refreshPending
+            refreshPending = false
+            return pending
+        }
     }
 
     private func persist(_ snapshot: WeatherSnapshot) {
@@ -417,7 +424,9 @@ final class WeatherMonitor {
         parser.dateFormat = "yyyy-MM-dd"
         guard let value = parser.date(from: date) else { return "--" }
         let labels = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
-        return labels[Calendar(identifier: .gregorian).component(.weekday, from: value) - 1]
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        return labels[calendar.component(.weekday, from: value) - 1]
     }
 }
 

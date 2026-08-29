@@ -176,9 +176,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             case let .success(info):
                 let sprites = [info.claudeCustomSprite ? "C:自定义" : "C:默认",
                                info.codexCustomSprite ? "X:自定义" : "X:默认"]
-                let showing = info.mode == "net" ? "网速"
-                    : info.mode == "music" ? "音乐"
-                    : info.mode == "weather" ? "天气"
+                let showing = info.effective == "net" ? "网速"
+                    : info.effective == "music" ? "音乐"
+                    : info.effective == "stock" ? "股票"
+                    : info.effective == "weather" ? "天气"
                     : (info.showing == "claude" ? "Claude" : "Codex")
                 self.deviceInfoItem.title =
                     "设备：\(info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"

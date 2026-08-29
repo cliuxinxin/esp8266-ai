@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-29-weather-app-design.md`
 
+**Scope update (2026-08-29):** The user explicitly deferred Windows support. Tasks 6 and 7 are not part of this execution; the release gate covers macOS plus ESP8266 only.
+
 ## Global Constraints
 
 - Default city is 成都 at latitude `30.66667`, longitude `104.06667`, timezone `Asia/Shanghai`.

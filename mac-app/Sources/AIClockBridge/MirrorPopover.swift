@@ -247,6 +247,21 @@ final class MirrorView: NSView {
         (aqi as NSString).draw(in: NSRect(x: 145, y: 5, width: 88, height: 18), withAttributes: small)
         ((weather.temperature.map { "\(Int($0.rounded()))°" } ?? "--°") as NSString)
             .draw(in: NSRect(x: 12, y: 47, width: 145, height: 58), withAttributes: main)
+        let iconText: String
+        switch WeatherMonitor.icon(for: weather.weatherCode) {
+        case .clear: iconText = "☀︎"
+        case .partlyCloudy, .cloudy, .overcast, .fog: iconText = "☁︎"
+        case .rain, .showers: iconText = "☂︎"
+        case .snow: iconText = "❄︎"
+        case .thunderstorm: iconText = "⚡︎"
+        case .unknown: iconText = "?"
+        }
+        let iconStyle: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 38, weight: .medium),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: center,
+        ]
+        (iconText as NSString).draw(in: NSRect(x: 160, y: 48, width: 68, height: 54), withAttributes: iconStyle)
         let metric = NSMutableParagraphStyle(); metric.alignment = .left
         let metrics: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
             .foregroundColor: NSColor.lightGray, .paragraphStyle: metric]
@@ -485,7 +500,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let weatherMonitor: WeatherMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐", "股票", "天气"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "C", "X", "网速", "音乐", "股票", "天气"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
