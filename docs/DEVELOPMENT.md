@@ -262,14 +262,14 @@ Mac 完成，ESP8266 不直接访问公网天气 API。
 - 手动选择天气模式时持续显示，设备接口使用 `POST /api/display mode=weather`。
 
 天气页复用全局行缓冲逐行读取中文文字条，不保存整屏位图；天气图标由固件用少色像素图形绘制。
-固件 v0.4.13 的 PlatformIO 构建结果：RAM 45,332 / 81,920（55.3%），Flash
-848,171 / 1,044,464（81.2%）。
+固件 v0.4.13 的 PlatformIO 构建结果：RAM 45,340 / 81,920（55.3%），Flash
+848,587 / 1,044,464（81.2%）。
 
 ## 8. 自动显示与名人名言
 
 ### 自动显示配置与同步
 
-Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只保存开关；定时项保存开关、间隔和显示时长。设置以 `auto_display_configuration_v1` 写入 `UserDefaults`，每次成功保存递增 revision，并由 `/status`（WiFi）或 `#STATUS`（USB 串口）携带：
+Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只保存开关；定时项保存开关、间隔和显示时长。设置以 `auto_display_configuration_v1` 写入 `UserDefaults`，每次成功保存递增 revision，并由 `/status`（WiFi）或 `#STATUS`（USB 串口）携带。配置与 revision 在同一个锁保护的状态快照中发布，HTTP 队列不会读到跨两次保存拼接的组合：
 
 ```json
 {
@@ -291,18 +291,29 @@ Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只�
 }
 ```
 
-`revision` 必须是 JSON 整数，Mac 从已保存值递增，固件不对其数值范围做截断；`interval_seconds` 的有效范围是 60–14,400 秒（UI 为 1–240 分钟），`duration_seconds` 为 5–60 秒，Mac 保存和固件接收时都会把后两者截断到范围内。事件优先级固定为：等待确认、正在工作的 Claude / Codex、音乐；Claude 和 Codex 同时工作且都已启用时沿用桌宠选择逻辑，每 2 秒轮换，并不存在两者之间的固定高低顺序。没有事件时，固件从已到期且数据有效的定时项中选择最久未显示的一项；事件打断定时页后保留该页，事件结束时重新开始一段完整显示时长。关闭开关只影响 `auto` 模式，手动固定模式始终绕过调度器。
+`revision` 必须是 JSON 整数，Mac 从已保存值递增，固件不对其数值范围做截断；`interval_seconds` 的有效范围是 60–14,400 秒（UI 为 1–240 分钟），`duration_seconds` 为 5–60 秒，Mac 保存和固件接收时都会把后两者截断到范围内。事件优先级固定为：等待确认、正在工作的 Claude / Codex、音乐；Claude 和 Codex 同时工作且都已启用时沿用桌宠选择逻辑，每 2 秒轮换，并不存在两者之间的固定高低顺序。没有事件时，固件从已到期且数据有效的定时项中选择最久未显示的一项；展示截止时间从页面首次完整绘制成功后开始计算，下载位图的耗时不会扣减显示时长。事件打断定时页后保留该页，事件结束并重新绘制成功时再开始一段完整显示时长。关闭开关只影响 `auto` 模式，手动固定模式始终绕过调度器。
 
-兼容行为：旧 bridge 不带 `auto_display` 时，新固件保留当前配置（首次启动即使用上述编译默认值）；新 revision 中缺失或类型错误的字段使用编译默认值，合法字段正常应用，revision 不变则不重置调度。名言或其他定时页数据无效时不会被 AUTO 选择。旧固件会忽略新 bridge 增加的 JSON 字段和未知串口帧，原有状态页仍可用，但要使用 `quote` 模式和可配置调度必须升级到 v0.4.13 固件。
+兼容行为：旧 bridge 不带 `auto_display` 时，新固件保留当前配置（首次启动即使用上述编译默认值）；Mac 成功解码到不完整的已保存配置时，会为每个缺失键补入产品默认值。新 revision 中缺失或类型错误的字段使用固件编译默认值，合法字段正常应用，revision 不变则不重置调度。名言或其他定时页数据无效时不会被 AUTO 选择。旧固件会忽略新 bridge 增加的 JSON 字段和未知串口帧，原有状态页仍可用，但要使用 `quote` 模式和可配置调度必须升级到 v0.4.13 固件；Mac 仍先保存设置，若 `/api/info` 返回可解析且低于 v0.4.13 的 `fw`，随后显示升级提示。
 
 ### 名人名言数据与接口
 
-`QuoteMonitor` 每 30 分钟刷新一次，中文源为 `https://v1.hitokoto.cn/`，英文源为 `https://zenquotes.io/`；两种语言交替优先并互为失败回退，拒绝空内容、过长内容和最近 20 条重复。最近一次成功结果缓存到 `~/Library/Application Support/AIClockBridge/quote-cache.json`，请求失败时继续使用；30 分钟后 JSON 的 `stale` 变为 `true`。
+`QuoteMonitor` 每 30 分钟刷新一次，中文源为 `https://v1.hitokoto.cn/`，英文源为 `https://zenquotes.io/`；两种语言交替优先并互为失败回退，拒绝空内容、正文或署名实际排版越界以及最近 20 条重复。缓存位于 `~/Library/Application Support/AIClockBridge/quote-cache.json`，使用版本化 envelope 保存最新中文、最新英文和最近历史；旧版直接编码的单个 `QuoteSnapshot` 会在读取时迁移。当前 schema 为：
+
+```json
+{
+  "version": 1,
+  "latest_chinese": {"text": "…", "author": "…", "language": "zh", "updated_at": 0, "text_rev": 1},
+  "latest_english": {"text": "…", "author": "…", "language": "en", "updated_at": 0, "text_rev": 2},
+  "recent_texts": ["…"]
+}
+```
+
+请求失败时继续使用当前结果；30 分钟后 `/quote` JSON 的 `stale` 变为 `true`。
 
 - `GET /quote`：`text`、`author`、`language`（`zh|en`）、Unix 秒 `updated_at`、`text_rev`、`stale`；尚无可用名言时返回 `{"available":false}`。
 - `GET /quote/text.raw`：已有可用名言时成功响应一张 240×240 RGB565 大端整屏位图，无头部，恰好 115,200 字节，设备按 480 字节一行流式绘制；尚未获取到任何名言时返回 404。
 - 固定名言模式：`POST /api/display mode=quote`。若 JSON 或整屏位图不可用，固件保留配置的 `quote` 模式但临时显示桌宠，直到内容可取。
-- 串口协议（每帧以换行结束）：bridge → device 支持 `#HELLO`、`#STATUS {json}`、`#NET {json}`、`#STOCK {json}`、`#QUOTE {json}`、`#CMD {json}`；device → bridge 为 `#DEVICE {"name":"aiclock","fw":"x.y.z"}`。`#QUOTE` 只同步元数据，整屏位图仍从 `/quote/text.raw` 获取，因此纯串口且无 WiFi 时不会进入名言页。
+- 串口协议（每帧以换行结束）：bridge → device 支持 `#HELLO`、`#STATUS {json}`、`#NET {json}`、`#STOCK {json}`、`#QUOTE {json}`、`#CMD {json}`；device → bridge 为 `#DEVICE {"name":"aiclock","fw":"x.y.z"}`。`#QUOTE` 只同步元数据，不能证明 HTTP 可达，也不会清除位图失败后的 5/10/20/40/60 秒退避；只有成功的 bridge HTTP 请求或位图下载会确认可达。USB 串口帧持续到达时固件跳过 `/quote` 元数据 HTTP 轮询，避免客户端隔离网络上的 3 秒超时阻塞串口。整屏位图仍从 `/quote/text.raw` 获取，因此纯串口且无可达 HTTP 时不会进入名言页。
 
 当前固件版本由 `firmware/include/config.h` 定义为 **0.4.13**。
 

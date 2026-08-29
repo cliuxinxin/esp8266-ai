@@ -84,7 +84,7 @@ Scheduled intervals accept 1–240 minutes and durations accept 5–60 seconds. 
 
 Disabling an item affects **AUTO mode only**. You can still choose any page manually from the Display menu or mirror controls. Choose **Display → 名人名言 (Daily Quote)** to keep the quote page fixed; **换一句 (Next Quote)** requests a new quote immediately and refreshes the device when quote mode is already fixed.
 
-The Mac bridge alternates between Chinese quotes from Hitokoto and English quotes from ZenQuotes. Neither source needs an API key. It refreshes about every 30 minutes, avoids recent duplicates, and caches the latest successful quote locally. When the network is unavailable the cache remains visible; after 30 minutes it is marked stale. Quotes require both the current Mac bridge and ESP8266 firmware.
+The Mac bridge alternates between Chinese quotes from Hitokoto and English quotes from ZenQuotes. Neither source needs an API key. It refreshes about every 30 minutes, avoids recent duplicates, and persists the latest Chinese quote, latest English quote, and 20-item recent history (migrating the former single-snapshot cache automatically). When the network is unavailable the cache remains visible; after 30 minutes it is marked stale. Quotes require both the current Mac bridge and ESP8266 firmware. Automatic-display settings are always saved on the Mac first; if a reachable device runs firmware older than v0.4.13, the app warns that an upgrade is required instead of implying that the local save synced to the device.
 
 ### Weather
 
