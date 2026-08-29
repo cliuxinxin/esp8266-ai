@@ -56,7 +56,9 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex
+- **屏幕显示**：自动，或固定 Claude / Codex / 网速 / 音乐 / 股票 / 天气 / 名人名言
+- **自动显示设置…**：分别配置事件触发项和定时项；保存后通过 `/status` 同步到固件
+- **换一句**：强制刷新名言；固定在名言模式时同时触发设备重新加载
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
@@ -197,7 +199,7 @@ pio device monitor -b 115200
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music\|stock\|weather` 切换屏幕显示 |
+| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music\|stock\|weather\|quote` 切换屏幕显示 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
@@ -256,14 +258,55 @@ Mac 完成，ESP8266 不直接访问公网天气 API。
 - `GET /weather/text.raw`：`[1B 条数][7 × 232 × 16 RGB565 大端像素]`，依次是城市、天气、
   风向、AQI 等级和三个预报日标签；设备只在 `text_rev` 变化时重新获取。
 - 数据超过 30 分钟显示陈旧标记；请求失败继续使用最后一次成功缓存，缺失数值显示 `--`。
-- AUTO 模式每 15 分钟显示天气 10 秒，优先级为：审批提醒、AI 工作、音乐、天气、空闲桌宠。
+- AUTO 默认每 15 分钟显示天气 10 秒；统一事件优先级和定时项公平选择规则见第 8 节。
 - 手动选择天气模式时持续显示，设备接口使用 `POST /api/display mode=weather`。
 
 天气页复用全局行缓冲逐行读取中文文字条，不保存整屏位图；天气图标由固件用少色像素图形绘制。
-固件 v0.4.12 的 PlatformIO 构建结果：RAM 44,560 / 81,920（54.4%），Flash
-843,239 / 1,044,464（80.7%）。
+固件 v0.4.13 的 PlatformIO 构建结果：RAM 45,332 / 81,920（55.3%），Flash
+848,171 / 1,044,464（81.2%）。
 
-## 8. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
+## 8. 自动显示与名人名言
+
+### 自动显示配置与同步
+
+Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只保存开关；定时项保存开关、间隔和显示时长。设置以 `auto_display_configuration_v1` 写入 `UserDefaults`，每次成功保存递增 revision，并由 `/status`（WiFi）或 `#STATUS`（USB 串口）携带：
+
+```json
+{
+  "auto_display": {
+    "revision": 1,
+    "events": {
+      "claude": false,
+      "codex": true,
+      "approval": true,
+      "music": true
+    },
+    "scheduled": {
+      "weather": {"enabled": true, "interval_seconds": 900, "duration_seconds": 10},
+      "quote":   {"enabled": true, "interval_seconds": 1800, "duration_seconds": 12},
+      "stock":   {"enabled": false, "interval_seconds": 900, "duration_seconds": 10},
+      "net":     {"enabled": false, "interval_seconds": 600, "duration_seconds": 10}
+    }
+  }
+}
+```
+
+`revision` 必须是 JSON 整数，Mac 从已保存值递增，固件不对其数值范围做截断；`interval_seconds` 的有效范围是 60–14,400 秒（UI 为 1–240 分钟），`duration_seconds` 为 5–60 秒，Mac 保存和固件接收时都会把后两者截断到范围内。事件优先级固定为：等待确认、Codex 工作、Claude 工作、音乐。没有事件时，固件从已到期且数据有效的定时项中选择最久未显示的一项；事件打断定时页后保留该页，事件结束时重新开始一段完整显示时长。关闭开关只影响 `auto` 模式，手动固定模式始终绕过调度器。
+
+兼容行为：旧 bridge 不带 `auto_display` 时，新固件保留当前配置（首次启动即使用上述编译默认值）；新 revision 中缺失或类型错误的字段使用编译默认值，合法字段正常应用，revision 不变则不重置调度。名言或其他定时页数据无效时不会被 AUTO 选择。旧固件会忽略新 bridge 增加的 JSON 字段和未知串口帧，原有状态页仍可用，但要使用 `quote` 模式和可配置调度必须升级到 v0.4.13 固件。
+
+### 名人名言数据与接口
+
+`QuoteMonitor` 每 30 分钟刷新一次，中文源为 `https://v1.hitokoto.cn/`，英文源为 `https://zenquotes.io/`；两种语言交替优先并互为失败回退，拒绝空内容、过长内容和最近 20 条重复。最近一次成功结果缓存到 `~/Library/Application Support/AIClockBridge/quote-cache.json`，请求失败时继续使用；30 分钟后 JSON 的 `stale` 变为 `true`。
+
+- `GET /quote`：`text`、`author`、`language`（`zh|en`）、Unix 秒 `updated_at`、`text_rev`、`stale`；尚无可用名言时返回 `{"available":false}`。
+- `GET /quote/text.raw`：一张 240×240 RGB565 大端整屏位图，无头部，恰好 115,200 字节；设备按 480 字节一行流式绘制。
+- 固定名言模式：`POST /api/display mode=quote`。若 JSON 或整屏位图不可用，固件保留配置的 `quote` 模式但临时显示桌宠，直到内容可取。
+- 串口协议（每帧以换行结束）：bridge → device 支持 `#HELLO`、`#STATUS {json}`、`#NET {json}`、`#STOCK {json}`、`#QUOTE {json}`、`#CMD {json}`；device → bridge 为 `#DEVICE {"name":"aiclock","fw":"x.y.z"}`。`#QUOTE` 只同步元数据，整屏位图仍从 `/quote/text.raw` 获取，因此纯串口且无 WiFi 时不会进入名言页。
+
+当前固件版本由 `firmware/include/config.h` 定义为 **0.4.13**。
+
+## 9. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
 
 除了日志 mtime 轮询（保留为兜底），bridge 还接收两个 CLI 官方 hooks 的事件推送，
 状态切换从"最多迟滞 20 秒"变成"毫秒级"：

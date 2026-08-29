@@ -32,7 +32,7 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
-An **enhanced weather page** shows current/feels-like/high/low temperature, humidity, wind, AQI, precipitation probability, and a three-day forecast. Chengdu is the default; change it from “Set weather city…” in the Mac menu. AUTO mode shows weather for 10 seconds every 15 minutes, below AI activity, approval alerts, and music in priority.
+The display also includes an **enhanced weather page** and a **daily quote page**. Weather covers current/feels-like/high/low temperature, humidity, wind, AQI, precipitation probability, and a three-day forecast. Quotes alternate between Chinese Hitokoto and English ZenQuotes, with the last successful result kept for offline use.
 
 ## Getting started
 
@@ -64,6 +64,60 @@ The bridge lives in your menu bar / tray and **auto-discovers and pairs** with t
 </p>
 
 Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, weather city, pet swapping, music/network pages, and more).
+
+### Automatic display and quotes
+
+On macOS, right-click the menu bar icon and choose **“自动显示设置…” (Automatic Display Settings)**. **Event-triggered** items appear immediately while an event is active; **scheduled** items become due at their configured interval and stay up for the configured duration. The shipped defaults are:
+
+| Type | Item | Enabled | Interval | Duration |
+|---|---|---:|---:|---:|
+| Event | Claude working | No | — | While active |
+| Event | Codex working | Yes | — | While active |
+| Event | Approval required | Yes | — | While active |
+| Event | Music playing | Yes | — | While playing |
+| Scheduled | Weather | Yes | 15 min | 10 s |
+| Scheduled | Daily quote | Yes | 30 min | 12 s |
+| Scheduled | Stocks | No | 15 min | 10 s |
+| Scheduled | Network speed | No | 10 min | 10 s |
+
+Scheduled intervals accept 1–240 minutes and durations accept 5–60 seconds. AUTO priority is **approval required > Codex working > Claude working > music > due scheduled content > idle pet**. If several scheduled items are due, the least recently shown one wins. An event interrupts scheduled content; when the event ends, that content resumes with a fresh full duration.
+
+Disabling an item affects **AUTO mode only**. You can still choose any page manually from the Display menu or mirror controls. Choose **Display → 名人名言 (Daily Quote)** to keep the quote page fixed; **换一句 (Next Quote)** requests a new quote immediately and refreshes the device when quote mode is already fixed.
+
+The Mac bridge alternates between Chinese quotes from Hitokoto and English quotes from ZenQuotes. Neither source needs an API key. It refreshes about every 30 minutes, avoids recent duplicates, and caches the latest successful quote locally. When the network is unavailable the cache remains visible; after 30 minutes it is marked stale. Quotes require both the current Mac bridge and ESP8266 firmware.
+
+### Weather
+
+Choose **Display → Weather** for a fixed weather page, or **Set weather city…** to search for a city (Chengdu is the default). The bridge refreshes weather about every 10 minutes and keeps its last successful cache through temporary network failures. Weather is enabled in AUTO mode by default as shown above.
+
+### Updating from source (macOS)
+
+Quit any installed AIClockBridge from the menu bar first so it does not keep port 8765 occupied, then update and launch the bridge:
+
+```bash
+git switch main
+git pull --ff-only origin main
+cd mac-app
+swift run
+```
+
+Or build and run the optimized binary:
+
+```bash
+cd mac-app
+swift build -c release
+.build/release/AIClockBridge
+```
+
+Connect the ESP8266 with a USB data cable, list the available serial ports, then build and flash:
+
+```bash
+cd firmware
+pio device list
+pio run -t upload
+```
+
+If the project default `/dev/cu.usbserial-130` does not match your device, add `--upload-port /dev/cu.usbserial-your-port`. After flashing, the board reboots automatically; use its `AI-Clock-Setup` hotspot if WiFi still needs configuration.
 
 ## FAQ
 

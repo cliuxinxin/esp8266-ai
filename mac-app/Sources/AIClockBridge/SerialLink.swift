@@ -4,7 +4,7 @@ import Foundation
 // isolation - or for skipping WiFi setup entirely. Scans for CH340-style
 // serial ports, handshakes, then pushes the same payloads the device would
 // otherwise poll over HTTP, as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
+//   bridge -> device:  #HELLO   #STATUS/#NET/#STOCK/#QUOTE {json}   #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
 // Device log lines (anything not starting with '#') are ignored.
 //
