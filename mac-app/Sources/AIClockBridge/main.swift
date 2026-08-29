@@ -42,20 +42,25 @@ netMonitor.start()
 let nowPlaying = NowPlayingMonitor()
 nowPlaying.start()
 service.musicPlayingProvider = { nowPlaying.snapshot.playing }
+let autoDisplaySettings = AutoDisplaySettingsStore()
+service.autoDisplaySettingsProvider = { autoDisplaySettings }
 
 let stockMonitor = StockMonitor()
 stockMonitor.start()
 let weatherMonitor = WeatherMonitor()
 weatherMonitor.start()
+let quoteMonitor = QuoteMonitor()
+quoteMonitor.start()
 
 // Wired fallback: if the clock is plugged in over USB, push status/net down
 // the serial line (works around AP client isolation; no WiFi setup needed).
-let serialLink = SerialLink(service: service, netMonitor: netMonitor, stockMonitor: stockMonitor)
+let serialLink = SerialLink(service: service, netMonitor: netMonitor, stockMonitor: stockMonitor,
+                            quoteMonitor: quoteMonitor)
 serialLink.start()
 
 let server = HTTPServer(port: port, routes: [
-    "/": { service.snapshot().jsonData() },
-    "/status": { service.snapshot().jsonData() },
+    "/": { service.jsonData() },
+    "/status": { service.jsonData() },
     "/net": {
         let stats = SystemStatsMonitor.shared.snapshot()
         return netMonitor.jsonData(cpu: stats.cpu, mem: stats.mem)
@@ -63,11 +68,13 @@ let server = HTTPServer(port: port, routes: [
     "/music": { nowPlaying.jsonData() },
     "/stock": { stockMonitor.jsonData() },
     "/weather": { weatherMonitor.jsonData() },
+    "/quote": { quoteMonitor.jsonData() },
 ], binaryRoutes: [
     "/music/cover.raw": { nowPlaying.coverRGB565 },
     "/music/text.raw": { nowPlaying.textRGB565 },
     "/stock/names.raw": { stockMonitor.namesRGB565() },
     "/weather/text.raw": { weatherMonitor.textRGB565() },
+    "/quote/text.raw": { quoteMonitor.textRGB565() },
 ], postRoutes: [
     // Claude Code / Codex hooks push lifecycle events here (see README §7):
     // curl -d '{"agent":"claude","event":"PreToolUse"}' http://127.0.0.1:8765/event
@@ -84,7 +91,7 @@ let server = HTTPServer(port: port, routes: [
 // Remember it (for auto-pairing / DHCP-change self-healing) and adopt it
 // outright when no device is configured yet.
 server.onRequest = { path, ip in
-    guard path == "/status" || path == "/net" || path == "/music" || path == "/weather",
+    guard path == "/status" || path == "/net" || path == "/music" || path == "/weather" || path == "/quote",
           ip != "127.0.0.1", ip != "::1", !ip.isEmpty else { return }
     DeviceClient.devicePollAt = Date()
     DeviceClient.lastSeenIP = ip

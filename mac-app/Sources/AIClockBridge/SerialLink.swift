@@ -14,6 +14,7 @@ final class SerialLink {
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
     private let stockMonitor: StockMonitor
+    private let quoteMonitor: QuoteMonitor
 
     private var fd: Int32 = -1
     private var portPath = ""
@@ -22,13 +23,16 @@ final class SerialLink {
     private var lastHelloAt = Date.distantPast
     private var lastStatusAt = Date.distantPast
     private var lastNetAt = Date.distantPast
+    private var lastQuoteAt = Date.distantPast
     private var rxBuf = Data()
     private var timer: Timer?
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor, stockMonitor: StockMonitor) {
+    init(service: StatusService, netMonitor: NetSpeedMonitor, stockMonitor: StockMonitor,
+         quoteMonitor: QuoteMonitor) {
         self.service = service
         self.netMonitor = netMonitor
         self.stockMonitor = stockMonitor
+        self.quoteMonitor = quoteMonitor
     }
 
     func start() {
@@ -61,8 +65,12 @@ final class SerialLink {
         }
         if now.timeIntervalSince(lastStatusAt) > 5 {
             lastStatusAt = now
-            send(frame("#STATUS ", service.snapshot().jsonData()))
+            send(frame("#STATUS ", service.jsonData()))
             send(frame("#STOCK ", stockMonitor.jsonData()))
+        }
+        if now.timeIntervalSince(lastQuoteAt) > 5 {
+            lastQuoteAt = now
+            send(frame("#QUOTE ", quoteMonitor.jsonData()))
         }
         if now.timeIntervalSince(lastNetAt) > 2 {
             lastNetAt = now
@@ -109,6 +117,7 @@ final class SerialLink {
         linked = false
         openedAt = Date()
         lastHelloAt = .distantPast
+        lastQuoteAt = .distantPast
         rxBuf.removeAll()
         FileHandle.standardError.write(Data("[serial] trying \(path)\n".utf8))
         return true
@@ -122,6 +131,7 @@ final class SerialLink {
         fd = -1
         portPath = ""
         linked = false
+        lastQuoteAt = .distantPast
     }
 
     // MARK: - I/O
@@ -156,6 +166,7 @@ final class SerialLink {
                     linked = true
                     lastStatusAt = .distantPast // push a status immediately
                     lastNetAt = .distantPast
+                    lastQuoteAt = .distantPast
                     FileHandle.standardError.write(Data("[serial] linked \(portPath): \(line)\n".utf8))
                 }
             }

@@ -51,6 +51,9 @@ final class StatusService {
     /// auto-switch). Set from NowPlayingMonitor in main.
     var musicPlayingProvider: (() -> Bool)?
 
+    /// Current auto-display preferences included with every status payload.
+    var autoDisplaySettingsProvider: (() -> AutoDisplaySettingsStore?)?
+
     // Hook-pushed live state (POST /event from Claude Code / Codex hooks).
     // Events beat the mtime heuristic while fresh: "working" for up to 10min
     // (a long tool run emits nothing between PreToolUse and PostToolUse),
@@ -195,6 +198,14 @@ final class StatusService {
         snap.codex.needsInput = needsInput(codexNeedsInputAt, now: now)
         snap.musicPlaying = musicPlayingProvider?() ?? false
         return snap
+    }
+
+    func jsonData() -> Data {
+        var payload = snapshot().jsonObject()
+        if let settings = autoDisplaySettingsProvider?() {
+            payload = StatusPayloadComposer.addAutoDisplay(payload, settings: settings)
+        }
+        return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
     }
 
     // MARK: - helpers
@@ -351,9 +362,17 @@ final class StatusService {
     }
 }
 
+enum StatusPayloadComposer {
+    static func addAutoDisplay(_ payload: [String: Any], settings: AutoDisplaySettingsStore) -> [String: Any] {
+        var payload = payload
+        payload["auto_display"] = settings.jsonObject()
+        return payload
+    }
+}
+
 extension Snapshot {
-    /// Serializes to the exact JSON shape the firmware's parseStatusJson expects.
-    func jsonData() -> Data {
+    /// Builds the exact JSON shape the firmware's parseStatusJson expects.
+    func jsonObject() -> [String: Any] {
         func num(_ v: Int?) -> Any { v.map { $0 as Any } ?? NSNull() }
         func num(_ v: Double?) -> Any { v.map { $0 as Any } ?? NSNull() }
         let dict: [String: Any] = [
@@ -382,6 +401,10 @@ extension Snapshot {
                 "needs_input": codex.needsInput,
             ],
         ]
-        return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data("{}".utf8)
+        return dict
+    }
+
+    func jsonData() -> Data {
+        (try? JSONSerialization.data(withJSONObject: jsonObject())) ?? Data("{}".utf8)
     }
 }

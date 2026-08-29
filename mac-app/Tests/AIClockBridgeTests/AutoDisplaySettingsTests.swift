@@ -2,6 +2,13 @@ import XCTest
 @testable import AIClockBridge
 
 final class AutoDisplaySettingsTests: XCTestCase {
+    func testStatusPayloadContainsAutoDisplayConfiguration() {
+        let store = AutoDisplaySettingsStore(defaults: .standard)
+        let payload = StatusPayloadComposer.addAutoDisplay(["version": "test"], settings: store)
+
+        XCTAssertNotNil(payload["auto_display"] as? [String: Any])
+    }
+
     func testDefaultsMatchProductDecision() {
         let configuration = AutoDisplayConfiguration.defaults
 
