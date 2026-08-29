@@ -82,17 +82,28 @@ void testAllItemsCanBeDisabled() {
   assert(chooseAutoDisplay(in) == AUTO_IDLE);
 }
 
-void testScheduledValidityMasks() {
+void testDisabledQuoteIsNeverSelected() {
+  AutoSelectionInputs in{};
+  in.config.scheduled[AUTO_SCHEDULED_QUOTE].enabled = false;
+  in.dueMask = AUTO_DUE_QUOTE;
+  in.validMask = AUTO_DUE_QUOTE;
+
+  assert(chooseAutoDisplay(in) == AUTO_IDLE);
+}
+
+void testEnabledValidQuoteIsSelectedWhenDue() {
+  AutoSelectionInputs in{};
+  in.dueMask = AUTO_DUE_QUOTE;
+  in.validMask = AUTO_DUE_QUOTE;
+
+  assert(chooseAutoDisplay(in) == AUTO_QUOTE);
+}
+
+void testInvalidQuoteFallsBackToAnotherDuePage() {
   AutoSelectionInputs in{};
   in.dueMask = AUTO_DUE_WEATHER | AUTO_DUE_QUOTE;
-  in.validMask = AUTO_DUE_QUOTE;
-  assert(chooseAutoDisplay(in) == AUTO_QUOTE);
+  in.validMask = AUTO_DUE_WEATHER;
 
-  in.validMask = 0;
-  assert(chooseAutoDisplay(in) == AUTO_IDLE);
-
-  in.validMask = AUTO_DUE_WEATHER | AUTO_DUE_QUOTE;
-  in.config.scheduled[AUTO_SCHEDULED_QUOTE].enabled = false;
   assert(chooseAutoDisplay(in) == AUTO_WEATHER);
 }
 
@@ -179,23 +190,23 @@ void testInterruptedPageRestartsWithFullDuration() {
 
 void testFixedModeDoesNotRunAutoScheduler() {
   AutoDisplayRuntimeState runtime{};
-  runtime.activeScheduledPage = AUTO_SCHEDULED_WEATHER;
-  runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs = 1000;
-  runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs = 6000;
-  runtime.scheduled[AUTO_SCHEDULED_WEATHER].lastShownOrder = 3;
+  runtime.activeScheduledPage = AUTO_SCHEDULED_QUOTE;
+  runtime.scheduled[AUTO_SCHEDULED_QUOTE].dueMs = 1000;
+  runtime.scheduled[AUTO_SCHEDULED_QUOTE].untilMs = 6000;
+  runtime.scheduled[AUTO_SCHEDULED_QUOTE].lastShownOrder = 3;
   runtime.lastShownOrder = 3;
 
   AutoTransitionInputs input{};
   input.autoMode = false;
   input.nowMs = 7000;
-  input.validMask = AUTO_DUE_WEATHER;
+  input.validMask = AUTO_DUE_QUOTE;
   input.approvalNeeded = true;
 
   assert(advanceAutoDisplay(runtime, input) == AUTO_IDLE);
-  assert(runtime.activeScheduledPage == AUTO_SCHEDULED_WEATHER);
-  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].dueMs == 1000);
-  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].untilMs == 6000);
-  assert(runtime.scheduled[AUTO_SCHEDULED_WEATHER].lastShownOrder == 3);
+  assert(runtime.activeScheduledPage == AUTO_SCHEDULED_QUOTE);
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].dueMs == 1000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].untilMs == 6000);
+  assert(runtime.scheduled[AUTO_SCHEDULED_QUOTE].lastShownOrder == 3);
   assert(runtime.lastShownOrder == 3);
 }
 
@@ -205,7 +216,9 @@ int main() {
   testApprovalsCanBeDisabled();
   testPriorityAndFairScheduledChoice();
   testAllItemsCanBeDisabled();
-  testScheduledValidityMasks();
+  testDisabledQuoteIsNeverSelected();
+  testEnabledValidQuoteIsSelectedWhenDue();
+  testInvalidQuoteFallsBackToAnotherDuePage();
   testInvalidRangesAreClampedWithoutMutatingInput();
   testMissingPatchFieldsUseDefaults();
   testInvalidPatchFieldsUseDefaults();

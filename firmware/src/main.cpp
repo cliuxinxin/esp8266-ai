@@ -74,9 +74,19 @@ unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
-// net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_WEATHER };
+// net/music/stock/weather/quote = show Mac-side content pages instead of the pet.
+enum DisplayMode {
+  MODE_AUTO,
+  MODE_CLAUDE,
+  MODE_CODEX,
+  MODE_NET,
+  MODE_MUSIC,
+  MODE_STOCK,
+  MODE_WEATHER,
+  MODE_QUOTE,
+};
 DisplayMode displayMode = MODE_AUTO;
+const char *displayModeName(DisplayMode m);
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
@@ -174,6 +184,24 @@ unsigned long lastWeatherPollMs = 0;
 bool weatherChromeDrawn = false;
 bool weatherDirty = false;
 int weatherTextDrawnRev = -1;
+
+// ---------- quote mode state ----------
+// The bridge rasterizes the whole page because the firmware has no CJK font.
+// Metadata is kept separately so AUTO can reject an unavailable HTTP transport
+// before committing a scheduled window to this bitmap-only page.
+struct QuoteState {
+  bool valid = false;
+  int textRev = -1;
+  String language;
+  long updatedAt = 0;
+  bool stale = false;
+};
+QuoteState quote;
+unsigned long lastQuotePollMs = 0;
+bool quoteDirty = false;
+bool quoteScreenDrawn = false;
+bool quoteBitmapFetchable = false;
+int quoteTextDrawnRev = -1;
 // CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
 // 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
 const int STOCK_NAME_W = 156, STOCK_NAME_H = 16;
@@ -1626,6 +1654,105 @@ void pollWeather() {
   http.end();
 }
 
+// ---------- quote screen ----------
+
+// HTTP /quote and serial #QUOTE both enter through this parser. Build a
+// complete replacement first so malformed/unavailable polls never destroy a
+// previously usable quote.
+bool handleQuotePayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload) ||
+      (doc["available"].is<bool>() && !doc["available"].as<bool>())) {
+    return false;
+  }
+  if (!doc["text"].is<const char *>() || !doc["language"].is<const char *>() ||
+      !doc["updated_at"].is<long>() || !doc["text_rev"].is<int>()) {
+    return false;
+  }
+  String text = doc["text"].as<String>();
+  text.trim();
+  const int textRev = doc["text_rev"].as<int>();
+  if (text.length() == 0 || textRev < 0) return false;
+
+  QuoteState next;
+  next.valid = true;
+  next.textRev = textRev;
+  next.language = doc["language"].as<String>();
+  next.updatedAt = doc["updated_at"].as<long>();
+  next.stale = doc["stale"] | false;
+
+  const bool changed = !quote.valid || next.textRev != quote.textRev;
+  quote = next;
+  quoteDirty = quoteDirty || changed;
+  // A fresh, valid metadata poll permits a retry after a prior raw transfer
+  // failure. Actual mode entry still requires WiFi and a configured bridge.
+  quoteBitmapFetchable = true;
+  return true;
+}
+
+bool quoteCanEnterMode() {
+  if (!quote.valid || quote.textRev < 0) return false;
+  if (quoteScreenDrawn && quoteTextDrawnRev == quote.textRev) return true;
+  return quoteBitmapFetchable && WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0;
+}
+
+// The quote page is exactly one 240x240 RGB565 frame. Stream one 480-byte row
+// at a time through the shared scratch buffer; a full frame would consume
+// 115,200 bytes and cannot fit in ESP8266 RAM.
+bool drawQuoteScreen() {
+  if (quoteScreenDrawn && quoteTextDrawnRev == quote.textRev && !quoteDirty) return true;
+  if (!quote.valid || quote.textRev < 0 || WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
+    return false;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, "http://" + bridgeHost + "/quote/text.raw")) {
+    quoteBitmapFetchable = false;
+    quoteScreenDrawn = false;
+    return false;
+  }
+  const int expectedBytes = SCREEN_W * SCREEN_H * 2;
+  if (http.GET() != HTTP_CODE_OK || http.getSize() != expectedBytes) {
+    http.end();
+    quoteBitmapFetchable = false;
+    quoteScreenDrawn = false;
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  const size_t rowBytes = (size_t)SCREEN_W * 2;
+  bool ok = true;
+  quoteScreenDrawn = false;
+  for (int row = 0; row < SCREEN_H; ++row) {
+    if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) {
+      ok = false;
+      break;
+    }
+    tft.pushImage(0, row, SCREEN_W, 1, rowBuf);
+    yield();
+  }
+  http.end();
+  quoteBitmapFetchable = ok;
+  if (!ok) return false;
+
+  quoteScreenDrawn = true;
+  quoteTextDrawnRev = quote.textRev;
+  quoteDirty = false;
+  return true;
+}
+
+void pollQuote() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, "http://" + bridgeHost + "/quote")) return;
+  if (http.GET() == HTTP_CODE_OK) handleQuotePayload(http.getString());
+  http.end();
+}
+
 // ---------- WiFi / bridge polling ----------
 
 WiFiManager wifiManager; // global: the config portal now runs non-blocking in loop()
@@ -1754,8 +1881,7 @@ bool parseStatusJson(const String &payload) {
 uint8_t autoScheduledValidityMask() {
   uint8_t mask = 0;
   if (weather.valid) mask |= AUTO_DUE_WEATHER;
-  // Quote is intentionally left invalid until its data/display path lands in
-  // Task 6. Keeping its scheduler slot now avoids changing the wire contract.
+  if (quoteCanEnterMode()) mask |= AUTO_DUE_QUOTE;
   if (stockEverLoaded) mask |= AUTO_DUE_STOCK;
   if (netEverLoaded) mask |= AUTO_DUE_NET;
   return mask;
@@ -1777,12 +1903,18 @@ DisplayMode effectiveMode() {
   input.validMask = autoScheduledValidityMask();
 
   const AutoDisplayChoice choice = advanceAutoDisplay(autoDisplayRuntime, input);
-  if (!input.autoMode) return displayMode;
+  if (!input.autoMode) {
+    // Keep the configured fixed mode, but report/render the pet until a quote
+    // revision is actually reachable. This prevents a wired-only #QUOTE frame
+    // from switching to a bitmap that the device cannot download.
+    if (displayMode == MODE_QUOTE && !quoteCanEnterMode()) return MODE_AUTO;
+    return displayMode;
+  }
   if (choice == AUTO_MUSIC) return MODE_MUSIC;
   if (choice == AUTO_WEATHER) return MODE_WEATHER;
+  if (choice == AUTO_QUOTE) return MODE_QUOTE;
   if (choice == AUTO_STOCK) return MODE_STOCK;
   if (choice == AUTO_NET) return MODE_NET;
-  // AUTO_QUOTE remains invalid until Task 6 supplies its data/display path.
   return MODE_AUTO;
 }
 
@@ -1820,7 +1952,8 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
+  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER &&
+      eff != MODE_QUOTE) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -1832,8 +1965,8 @@ void pollBridge() {
 // Fallback for WiFi networks with client isolation (device can't reach the
 // bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
 // plugged into the computer over USB, the bridge pushes the same /status and
-// /net payloads down the CH340 serial line as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
+// content payloads down the CH340 serial line as newline-terminated frames:
+//   bridge -> device:  #HELLO  #STATUS/#NET/#STOCK/#QUOTE {json}  #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
 // Everything else the device prints (logs) is ignored by the bridge.
 unsigned long lastSerialFrameMs = 0;
@@ -1865,7 +1998,8 @@ void handleSerialFrame(char *line) {
       everPolled = true;
       showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
+      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER &&
+          eff != MODE_QUOTE) {
         if (updateActiveApp()) drawActiveApp();
         else refreshActiveApp();
       }
@@ -1878,6 +2012,10 @@ void handleSerialFrame(char *line) {
   }
   if (!strncmp(line, "#STOCK ", 7)) {
     handleStockPayload(String(line + 7));
+    return;
+  }
+  if (!strncmp(line, "#QUOTE ", 7)) {
+    handleQuotePayload(String(line + 7));
     return;
   }
   if (!strncmp(line, "#CMD ", 5)) {
@@ -1898,6 +2036,7 @@ void handleSerialFrame(char *line) {
       else if (m == "music") displayMode = MODE_MUSIC;
       else if (m == "stock") displayMode = MODE_STOCK;
       else if (m == "weather") displayMode = MODE_WEATHER;
+      else if (m == "quote") displayMode = MODE_QUOTE;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
     return;
@@ -1937,13 +2076,13 @@ String htmlEscape(const String &s) {
 void handleRoot() {
   String age = everPolled ? String((millis() - lastSuccessMs) / 1000) + "s ago" : "never";
   String html;
-  html.reserve(3072);
+  html.reserve(4096);
   html += "<!DOCTYPE html><html><head><meta charset='utf-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<title>AI Clock 设置</title>";
   html += "<style>body{font-family:-apple-system,sans-serif;max-width:480px;margin:24px "
           "auto;padding:0 16px;color:#222} h1{font-size:20px} label{display:block;margin-top:16px;font-weight:600}"
-          "input{width:100%;box-sizing:border-box;padding:8px;font-size:16px;margin-top:4px}"
+          "input,select{width:100%;box-sizing:border-box;padding:8px;font-size:16px;margin-top:4px}"
           "button{margin-top:16px;padding:10px 20px;font-size:16px;background:#2563eb;color:#fff;"
           "border:none;border-radius:6px}"
           "table{margin-top:20px;border-collapse:collapse;width:100%}"
@@ -1957,6 +2096,24 @@ void handleRoot() {
   html += "<input name='bridge' value='" + htmlEscape(bridgeHost) + "' placeholder='192.168.1.181:8765'>";
   html += "<button type='submit'>保存</button>";
   html += "</form>";
+
+  html += "<h2 style='font-size:16px;margin-top:28px'>显示模式</h2>";
+  html += "<select id='displayMode' onchange=\"fetch('/api/display',{method:'POST',headers:{"
+          "'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(this.value)})\">";
+  auto appendModeOption = [&](const char *value, const char *label) {
+    html += "<option value='" + String(value) + "'";
+    if (!strcmp(value, displayModeName(displayMode))) html += " selected";
+    html += ">" + String(label) + "</option>";
+  };
+  appendModeOption("auto", "自动");
+  appendModeOption("claude", "Claude");
+  appendModeOption("codex", "Codex");
+  appendModeOption("net", "网络");
+  appendModeOption("music", "音乐");
+  appendModeOption("stock", "股票");
+  appendModeOption("weather", "天气");
+  appendModeOption("quote", "名人名言");
+  html += "</select>";
 
   // Backlight brightness slider: applies live on release (PWM, persisted).
   html += "<h2 style='font-size:16px;margin-top:28px'>屏幕亮度</h2>";
@@ -2022,6 +2179,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
   if (m == MODE_WEATHER) return "weather";
+  if (m == MODE_QUOTE) return "quote";
   return "auto";
 }
 
@@ -2049,6 +2207,12 @@ void handleApiInfo() {
   x["custom_sprite"] = codexCustom;
   x["w"] = CODEX_SPRITE_W;
   x["h"] = CODEX_SPRITE_H;
+  JsonObject q = doc["quote"].to<JsonObject>();
+  q["valid"] = quote.valid;
+  q["text_rev"] = quote.textRev;
+  q["language"] = quote.language;
+  q["updated_at"] = quote.updatedAt;
+  q["stale"] = quote.stale;
   String out;
   serializeJson(doc, out);
   webServer.send(200, "application/json", out);
@@ -2063,8 +2227,9 @@ void handleApiDisplay() {
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "weather") displayMode = MODE_WEATHER;
+  else if (mode == "quote") displayMode = MODE_QUOTE;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|weather");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|weather|quote");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2080,7 +2245,11 @@ void handleApiDisplay() {
   } else if (displayMode == MODE_WEATHER) {
     weatherChromeDrawn = false;
     lastWeatherPollMs = 0;
+  } else if (displayMode == MODE_QUOTE) {
+    quoteScreenDrawn = false;
+    lastQuotePollMs = 0;
   } else {
+    quoteScreenDrawn = false;
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
   }
@@ -2470,12 +2639,19 @@ void loop() {
 
   unsigned long nowMs = millis();
 
-  // Weather stays warm in AUTO so a scheduled window never blocks on HTTP.
+  // Weather and quote metadata stay warm in AUTO so scheduled windows never
+  // have to wait for their JSON payloads after becoming due.
   if (WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
       (displayMode == MODE_AUTO || displayMode == MODE_WEATHER) &&
       (lastWeatherPollMs == 0 || nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS)) {
     lastWeatherPollMs = nowMs;
     pollWeather();
+  }
+  if (WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
+      (displayMode == MODE_AUTO || displayMode == MODE_QUOTE) &&
+      (lastQuotePollMs == 0 || nowMs - lastQuotePollMs >= QUOTE_POLL_INTERVAL_MS)) {
+    lastQuotePollMs = nowMs;
+    pollQuote();
   }
 
   // Prime scheduled pages that do not arrive in /status. Once a first valid
@@ -2497,7 +2673,16 @@ void loop() {
   // audio plays). On a transition, reset the incoming mode's chrome so it
   // repaints cleanly, and repaint the pet immediately when returning to it.
   DisplayMode eff = effectiveMode();
+  if (eff == MODE_QUOTE && lastEffectiveMode != MODE_QUOTE && !drawQuoteScreen()) {
+    // drawQuoteScreen marks this revision temporarily unfetchable. Re-run the
+    // scheduler so AUTO can choose another due page (or a fixed quote can keep
+    // showing the pet), and force the normal transition repaint in case a
+    // short body had already overwritten some rows.
+    eff = effectiveMode();
+    lastEffectiveMode = MODE_QUOTE;
+  }
   if (eff != lastEffectiveMode) {
+    if (lastEffectiveMode == MODE_QUOTE) quoteScreenDrawn = false;
     lastEffectiveMode = eff;
     if (eff == MODE_NET) {
       netChromeDrawn = false;
@@ -2511,6 +2696,8 @@ void loop() {
     } else if (eff == MODE_WEATHER) {
       weatherChromeDrawn = false;
       lastWeatherPollMs = 0;
+    } else if (eff == MODE_QUOTE) {
+      lastQuotePollMs = 0;
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -2543,6 +2730,8 @@ void loop() {
     if (!stockChromeDrawn || stockDirty) drawStockScreen();
   } else if (eff == MODE_WEATHER) {
     if (!weatherChromeDrawn || weatherDirty) drawWeatherScreen();
+  } else if (eff == MODE_QUOTE) {
+    if (!quoteScreenDrawn || quoteDirty || quoteTextDrawnRev != quote.textRev) drawQuoteScreen();
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
