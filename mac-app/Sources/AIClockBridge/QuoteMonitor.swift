@@ -107,10 +107,12 @@ final class QuoteMonitor {
         }
 
         let preferredLanguage = withStateLock { storedSnapshot?.language == "zh" ? "en" : "zh" }
+        let fallbackLanguage = preferredLanguage == "zh" ? "en" : "zh"
         var lastError: Error?
-        for _ in 0..<Self.maxContentAttempts {
+        for attempt in 0..<Self.maxContentAttempts {
             do {
-                let quote = try await fetch(language: preferredLanguage)
+                let language = attempt.isMultiple(of: 2) ? preferredLanguage : fallbackLanguage
+                let quote = try await fetch(language: language)
                 guard Self.isDisplayable(quote) else {
                     lastError = QuoteMonitorError.notDisplayable
                     continue
