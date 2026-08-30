@@ -90,6 +90,8 @@ final class MirrorView: NSView {
     var weatherSnapshot: WeatherSnapshot?
     var quoteMode = false
     var quoteSnapshot: QuoteSnapshot?
+    var nowMode = false
+    var nowSnapshot: NowPageData?
     var netHeaderDL = "0B"
     var netHeaderUL = "0B"
     private static let netCols = 224 // NET_CHART_W
@@ -162,6 +164,11 @@ final class MirrorView: NSView {
         }
         if quoteMode {
             drawQuoteScene()
+            ctx.restoreGState()
+            return
+        }
+        if nowMode {
+            drawNowScene()
             ctx.restoreGState()
             return
         }
@@ -294,11 +301,13 @@ final class MirrorView: NSView {
     private func drawQuoteScene() {
         let center = NSMutableParagraphStyle()
         center.alignment = .center
-        ("DAILY QUOTE" as NSString).draw(in: NSRect(x: 8, y: 10, width: 224, height: 18), withAttributes: [
+        let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.systemTeal,
             .paragraphStyle: center,
-        ])
+        ]
+        ("DAILY QUOTE" as NSString).draw(in: NSRect(x: 8, y: 10, width: 224, height: 18),
+                                        withAttributes: titleAttributes)
 
         guard let quote = quoteSnapshot else {
             ("暂无名言" as NSString).draw(in: NSRect(x: 16, y: 105, width: 208, height: 22), withAttributes: [
@@ -309,32 +318,39 @@ final class MirrorView: NSView {
             return
         }
 
-        let body = NSMutableParagraphStyle()
-        body.alignment = .left
-        body.lineBreakMode = .byWordWrapping
-        ("“\(quote.text)”" as NSString).draw(in: NSRect(x: 16, y: 37, width: 208, height: 145), withAttributes: [
-            .font: NSFont.systemFont(ofSize: quote.language == "zh" ? 17 : 15, weight: .medium),
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: body,
-        ])
+        // Mirror draws top-left origin, so the shared layout is used as-is.
+        guard let layout = QuotePageLayout.make(for: quote) else { return }
+        for run in layout.runs {
+            (run.text as NSString).draw(in: run.rect, withAttributes: run.attributes)
+        }
+    }
 
-        let author = NSMutableParagraphStyle()
-        author.alignment = .right
-        ("— \(quote.author)" as NSString).draw(in: NSRect(x: 16, y: 184, width: 208, height: 18), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
-            .foregroundColor: NSColor(white: 0.75, alpha: 1),
-            .paragraphStyle: author,
-        ])
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        let footer = "\(quote.language.uppercased())  ·  \(formatter.string(from: quote.updatedAt))"
-        (footer as NSString).draw(in: NSRect(x: 16, y: 211, width: 208, height: 16), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .regular),
-            .foregroundColor: NSColor(white: 0.48, alpha: 1),
-            .paragraphStyle: body,
-        ])
+    /// Composite 此刻 page: quote as the main block + weather strip + Codex
+    /// weekly-quota bar/reset, using the exact same geometry the device
+    /// rasterizes into /now/text.raw (see NowPageLayout).
+    private func drawNowScene() {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        guard let data = nowSnapshot, let layout = NowPageLayout.make(for: data) else {
+            ("暂无内容" as NSString).draw(in: NSRect(x: 16, y: 105, width: 208, height: 22), withAttributes: [
+                .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: center,
+            ])
+            return
+        }
+        for run in layout.textRuns {
+            (run.text as NSString).draw(in: run.rect, withAttributes: run.attributes)
+        }
+        // divider + Codex quota bar (top-left origin, same rects as the bitmap)
+        NSColor(white: 0.25, alpha: 1).setFill()
+        layout.dividerRect.fill()
+        NSColor(white: 0.2, alpha: 1).setFill()
+        layout.codexBarRect.fill()
+        layout.codexBarColor.setFill()
+        NSRect(x: layout.codexBarRect.minX, y: layout.codexBarRect.minY,
+               width: layout.codexBarRect.width * layout.codexFillRatio,
+               height: layout.codexBarRect.height).fill()
     }
 
     private func drawMusicScene(_ ctx: CGContext) {
@@ -552,11 +568,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let stockMonitor: StockMonitor
     private let weatherMonitor: WeatherMonitor
     private let quoteMonitor: QuoteMonitor
+    private let nowMonitor: NowPageMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
     private static let modeSegments = [("自动", "auto"), ("C", "claude"), ("X", "codex"),
                                        ("网速", "net"), ("音乐", "music"), ("股票", "stock"),
-                                       ("天气", "weather"), ("言", "quote")]
+                                       ("天气", "weather"), ("言", "quote"), ("此刻", "now")]
     private let modeControl = NSSegmentedControl(labels: modeSegments.map(\.0),
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
@@ -576,13 +593,15 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var fetchingSlot: String?
 
     init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor,
-         stockMonitor: StockMonitor, weatherMonitor: WeatherMonitor, quoteMonitor: QuoteMonitor) {
+         stockMonitor: StockMonitor, weatherMonitor: WeatherMonitor, quoteMonitor: QuoteMonitor,
+         nowMonitor: NowPageMonitor) {
         self.service = service
         self.netMonitor = netMonitor
         self.nowPlaying = nowPlaying
         self.stockMonitor = stockMonitor
         self.weatherMonitor = weatherMonitor
         self.quoteMonitor = quoteMonitor
+        self.nowMonitor = nowMonitor
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -720,7 +739,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
                     : info.mode == "music" ? "音乐播放"
-                    : info.mode == "quote" ? "名人名言" : "固定显示"
+                    : info.mode == "quote" ? "名人名言"
+                    : info.mode == "now" ? "此刻" : "固定显示"
                 self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
             case .failure:
                 self.mirror.deviceOK = false
@@ -752,6 +772,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         mirror.quoteMode = info.effective == "quote"
         if mirror.quoteMode {
             mirror.quoteSnapshot = quoteMonitor.snapshot
+            mirror.needsDisplay = true
+            return
+        }
+        mirror.nowMode = info.effective == "now"
+        if mirror.nowMode {
+            mirror.nowSnapshot = nowMonitor.snapshot
             mirror.needsDisplay = true
             return
         }

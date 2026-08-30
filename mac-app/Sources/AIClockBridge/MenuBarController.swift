@@ -10,6 +10,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let usage: UsageFetcher
     private let weatherMonitor: WeatherMonitor
     private let quoteMonitor: QuoteMonitor
+    private let nowMonitor: NowPageMonitor
     private let port: UInt16
     private let controlMenu = NSMenu()
     private let mirrorPopover: MirrorPopoverController
@@ -23,17 +24,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
          nowPlaying: NowPlayingMonitor, stockMonitor: StockMonitor,
          weatherMonitor: WeatherMonitor, settingsStore: AutoDisplaySettingsStore,
-         quoteMonitor: QuoteMonitor, port: UInt16) {
+         quoteMonitor: QuoteMonitor, nowMonitor: NowPageMonitor, port: UInt16) {
         self.service = service
         self.usage = usage
         self.port = port
         self.weatherMonitor = weatherMonitor
         self.quoteMonitor = quoteMonitor
+        self.nowMonitor = nowMonitor
         self.settingsWindow = AutoDisplaySettingsWindowController(store: settingsStore)
         self.mirrorPopover = MirrorPopoverController(service: service, netMonitor: netMonitor,
                                                      nowPlaying: nowPlaying, stockMonitor: stockMonitor,
                                                      weatherMonitor: weatherMonitor,
-                                                     quoteMonitor: quoteMonitor)
+                                                     quoteMonitor: quoteMonitor,
+                                                     nowMonitor: nowMonitor)
         super.init()
         buildMenu()
         if let button = statusItem.button {
@@ -92,7 +95,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
                               ("固定 Codex", "codex"), ("网速曲线", "net"),
                               ("音乐播放", "music"), ("股票行情", "stock"), ("天气", "weather"),
-                              ("名人名言", "quote")] {
+                              ("名人名言", "quote"), ("此刻", "now")] {
             let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = mode
@@ -259,6 +262,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case "stock": return "股票"
         case "weather": return "天气"
         case "quote": return "名言"
+        case "now": return "此刻"
         default: return info.showing == "claude" ? "Claude" : "Codex"
         }
     }

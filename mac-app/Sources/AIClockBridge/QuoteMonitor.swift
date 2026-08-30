@@ -49,8 +49,10 @@ final class QuoteMonitor {
     private static let maxRecentTexts = 20
     private static let maxContentAttempts = 3
     private static let cacheVersion = 1
-    private static let bodyRect = NSRect(x: 16, y: 58, width: 208, height: 145)
-    private static let authorRect = NSRect(x: 16, y: 37, width: 208, height: 18)
+    // 内容更换间隔。原为 30 分钟，但名言页每 2 分钟露一次面、每次 30 秒，
+    // 同一句会重复出现十几次；做成「此刻」常驻页后更等于半小时不变的静态
+    // 卡片，所以缩短到 5 分钟。两个来源交替请求，实际每个源约 6 次/小时。
+    private static let refreshInterval: TimeInterval = 5 * 60
 
     private let client: QuoteHTTPClient
     private let cacheURL: URL
@@ -103,7 +105,7 @@ final class QuoteMonitor {
 
     func start() {
         Task { await refresh(force: false) }
-        timer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: Self.refreshInterval, repeats: true) { [weak self] _ in
             Task { await self?.refresh(force: false) }
         }
     }
@@ -140,28 +142,10 @@ final class QuoteMonitor {
         if let lastError { errorReporter(lastError) }
     }
 
+    /// True when the quote can be typeset on the 240×240 page without clipping.
     static func isDisplayable(_ quote: QuoteSnapshot) -> Bool {
-        let count = quote.text.count
-        guard !quote.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !quote.author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              count <= (quote.language == "zh" ? 80 : 180) else {
-            return false
-        }
-
-        let bodyBounds = ("“\(quote.text)”" as NSString).boundingRect(
-            with: NSSize(width: bodyRect.width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: bodyTextAttributes(for: quote.language)
-        )
-        let authorBounds = ("— \(quote.author)" as NSString).boundingRect(
-            with: NSSize(width: .greatestFiniteMagnitude, height: authorRect.height),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: authorTextAttributes()
-        )
-        return ceil(bodyBounds.width) <= bodyRect.width
-            && ceil(bodyBounds.height) <= bodyRect.height
-            && ceil(authorBounds.width) <= authorRect.width
-            && ceil(authorBounds.height) <= authorRect.height
+        guard let layout = QuotePageLayout.make(for: quote) else { return false }
+        return layout.fits
     }
 
     static func parseHitokoto(_ data: Data) throws -> QuoteSnapshot {
@@ -292,29 +276,10 @@ final class QuoteMonitor {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func bodyTextAttributes(for language: String) -> [NSAttributedString.Key: Any] {
-        let style = NSMutableParagraphStyle()
-        style.lineBreakMode = .byWordWrapping
-        style.alignment = .left
-        return [
-            .font: NSFont.systemFont(ofSize: language == "zh" ? 17 : 15, weight: .medium),
-            .paragraphStyle: style,
-        ]
-    }
-
-    private static func authorTextAttributes() -> [NSAttributedString.Key: Any] {
-        let style = NSMutableParagraphStyle()
-        style.lineBreakMode = .byClipping
-        style.alignment = .right
-        return [
-            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
-            .paragraphStyle: style,
-        ]
-    }
-
     private static func renderQuotePage(_ quote: QuoteSnapshot) -> Data {
-        let size = 240
-        guard let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
+        let size = QuotePageLayout.pageSize
+        guard let layout = QuotePageLayout.make(for: quote),
+              let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
                                       bytesPerRow: size * 4, space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return Data(count: size * size * 2)
@@ -324,44 +289,12 @@ final class QuoteMonitor {
 
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-        let titleStyle = NSMutableParagraphStyle()
-        titleStyle.alignment = .center
-        ("DAILY QUOTE" as NSString).draw(in: NSRect(x: 8, y: 215, width: 224, height: 18), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.systemTeal,
-            .paragraphStyle: titleStyle,
-        ])
-        var bodyAttributes = bodyTextAttributes(for: quote.language)
-        bodyAttributes[.foregroundColor] = NSColor.white
-        ("“\(quote.text)”" as NSString).draw(in: bodyRect, withAttributes: bodyAttributes)
-        var authorAttributes = authorTextAttributes()
-        authorAttributes[.foregroundColor] = NSColor(white: 0.75, alpha: 1)
-        ("— \(quote.author)" as NSString).draw(in: authorRect, withAttributes: authorAttributes)
-        let footerStyle = NSMutableParagraphStyle()
-        footerStyle.alignment = .left
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        let footer = "\(quote.language.uppercased())  ·  \(formatter.string(from: quote.updatedAt))"
-        (footer as NSString).draw(in: NSRect(x: 16, y: 15, width: 208, height: 16), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .regular),
-            .foregroundColor: NSColor(white: 0.48, alpha: 1),
-            .paragraphStyle: footerStyle,
-        ])
+        for run in layout.runs {
+            (run.text as NSString).draw(in: run.deviceRect(), withAttributes: run.attributes)
+        }
         NSGraphicsContext.restoreGraphicsState()
 
-        guard let rendered = context.data else { return Data(count: size * size * 2) }
-        let pixels = rendered.bindMemory(to: UInt8.self, capacity: size * size * 4)
-        var output = Data(capacity: size * size * 2)
-        for pixel in 0..<(size * size) {
-            let offset = pixel * 4
-            let value = (UInt16(pixels[offset] & 0xF8) << 8)
-                | (UInt16(pixels[offset + 1] & 0xFC) << 3)
-                | UInt16(pixels[offset + 2] >> 3)
-            output.append(UInt8(value >> 8))
-            output.append(UInt8(value & 0xFF))
-        }
-        return output
+        return RGB565.encode(from: context, width: size, height: size)
     }
 }
 

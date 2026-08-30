@@ -83,6 +83,7 @@ enum DisplayMode {
   MODE_STOCK,
   MODE_WEATHER,
   MODE_QUOTE,
+  MODE_NOW, // "此刻": Mac-rendered composite (quote + weather + Codex quota) bitmap
 };
 DisplayMode displayMode = MODE_AUTO;
 const char *displayModeName(DisplayMode m);
@@ -201,6 +202,19 @@ bool quoteDirty = false;
 bool quoteScreenDrawn = false;
 QuoteBitmapFetchState quoteBitmapFetchState;
 int quoteTextDrawnRev = -1;
+// ---------- "NOW" (此刻) composite page state ----------
+// The Mac rasterizes the whole 240x240 card (quote + weather + Codex quota)
+// because the firmware has no CJK font and the page mixes three live sources.
+// Same transport shape as the quote page: /now metadata carries a `rev` that
+// bumps whenever any visible input changed; /now/text.raw is one 240x240
+// RGB565 frame. The device refetches the bitmap only when the rev moves.
+bool nowValid = false;
+int nowRev = -1;               // last metadata rev (-1 = never received)
+unsigned long lastNowPollMs = 0;
+bool nowDirty = false;         // rev changed since last successful draw
+bool nowScreenDrawn = false;   // a full frame is currently on screen
+QuoteBitmapFetchState nowBitmapFetchState;
+int nowDrawnRev = -1;          // rev of the frame currently on screen
 // CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
 // 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
 const int STOCK_NAME_W = 156, STOCK_NAME_H = 16;
@@ -1684,36 +1698,39 @@ bool quoteCanEnterMode() {
          quoteBitmapFetchAllowed(quoteBitmapFetchState, millis());
 }
 
-// The quote page is exactly one 240x240 RGB565 frame. Stream one 480-byte row
-// at a time through the shared scratch buffer; a full frame would consume
-// 115,200 bytes and cannot fit in ESP8266 RAM.
-bool drawQuoteScreen() {
-  if (quoteScreenDrawn && quoteTextDrawnRev == quote.textRev && !quoteDirty) return true;
-  if (!quote.valid || quote.textRev < 0 || WiFi.status() != WL_CONNECTED ||
-      bridgeHost.length() == 0 || !quoteBitmapFetchAllowed(quoteBitmapFetchState, millis())) {
+// Both the quote page and the composite "NOW" (此刻) page are exactly one
+// 240x240 RGB565 frame. Stream one 480-byte row at a time through the shared
+// scratch buffer; a full frame would consume 115,200 bytes and cannot fit in
+// ESP8266 RAM. `payloadRev` gates re-fetching: the page is re-streamed only
+// when the metadata revision moved or the previous fetch failed.
+bool streamBitmapPage(const String &url, QuoteBitmapFetchState &state, bool &screenDrawn,
+                      bool &dirty, int &drawnRev, int payloadRev) {
+  if (screenDrawn && drawnRev == payloadRev && !dirty) return true;
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0 ||
+      !quoteBitmapFetchAllowed(state, millis())) {
     return false;
   }
 
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, "http://" + bridgeHost + "/quote/text.raw")) {
-    noteQuoteBitmapFetchFailure(quoteBitmapFetchState, millis());
-    quoteScreenDrawn = false;
+  if (!http.begin(client, "http://" + bridgeHost + url)) {
+    noteQuoteBitmapFetchFailure(state, millis());
+    screenDrawn = false;
     return false;
   }
   const int expectedBytes = SCREEN_W * SCREEN_H * 2;
   if (http.GET() != HTTP_CODE_OK || http.getSize() != expectedBytes) {
     http.end();
-    noteQuoteBitmapFetchFailure(quoteBitmapFetchState, millis());
-    quoteScreenDrawn = false;
+    noteQuoteBitmapFetchFailure(state, millis());
+    screenDrawn = false;
     return false;
   }
 
   WiFiClient *stream = http.getStreamPtr();
   const size_t rowBytes = (size_t)SCREEN_W * 2;
   bool ok = true;
-  quoteScreenDrawn = false;
+  screenDrawn = false;
   for (int row = 0; row < SCREEN_H; ++row) {
     if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) {
       ok = false;
@@ -1724,15 +1741,34 @@ bool drawQuoteScreen() {
   }
   http.end();
   if (!ok) {
-    noteQuoteBitmapFetchFailure(quoteBitmapFetchState, millis());
+    noteQuoteBitmapFetchFailure(state, millis());
     return false;
   }
 
-  noteQuoteBitmapFetchSuccess(quoteBitmapFetchState);
-  quoteScreenDrawn = true;
-  quoteTextDrawnRev = quote.textRev;
-  quoteDirty = false;
+  noteQuoteBitmapFetchSuccess(state);
+  screenDrawn = true;
+  drawnRev = payloadRev;
+  dirty = false;
   return true;
+}
+
+bool drawQuoteScreen() {
+  if (!quote.valid || quote.textRev < 0) return false;
+  return streamBitmapPage("/quote/text.raw", quoteBitmapFetchState, quoteScreenDrawn,
+                          quoteDirty, quoteTextDrawnRev, quote.textRev);
+}
+
+bool nowCanEnterMode() {
+  if (!nowValid || nowRev < 0) return false;
+  if (nowScreenDrawn && nowDrawnRev == nowRev) return true;
+  return WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
+         quoteBitmapFetchAllowed(nowBitmapFetchState, millis());
+}
+
+bool drawNowScreen() {
+  if (!nowValid || nowRev < 0) return false;
+  return streamBitmapPage("/now/text.raw", nowBitmapFetchState, nowScreenDrawn,
+                          nowDirty, nowDrawnRev, nowRev);
 }
 
 void pollQuote() {
@@ -1749,6 +1785,31 @@ void pollQuote() {
     handleQuotePayload(http.getString(), QUOTE_METADATA_HTTP);
   } else {
     noteQuoteHTTPMetadataFailure(quoteBitmapFetchState, millis());
+  }
+  http.end();
+}
+
+void pollNow() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, "http://" + bridgeHost + "/now")) {
+    noteQuoteHTTPMetadataFailure(nowBitmapFetchState, millis());
+    return;
+  }
+  if (http.GET() == HTTP_CODE_OK) {
+    noteQuoteHTTPReachable(nowBitmapFetchState);
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString()) && doc["rev"].is<int>()) {
+      const int rev = doc["rev"].as<int>();
+      const bool changed = !nowValid || rev != nowRev;
+      nowValid = true;
+      nowRev = rev;
+      nowDirty = nowDirty || changed;
+    }
+  } else {
+    noteQuoteHTTPMetadataFailure(nowBitmapFetchState, millis());
   }
   http.end();
 }
@@ -1905,9 +1966,10 @@ DisplayMode effectiveMode() {
   const AutoDisplayChoice choice = advanceAutoDisplay(autoDisplayRuntime, input);
   if (!input.autoMode) {
     // Keep the configured fixed mode, but report/render the pet until a quote
-    // revision is actually reachable. This prevents a wired-only #QUOTE frame
-    // from switching to a bitmap that the device cannot download.
+    // revision is actually reachable. This prevents a wired-only #QUOTE / #NOW
+    // frame from switching to a bitmap that the device cannot download.
     if (displayMode == MODE_QUOTE && !quoteCanEnterMode()) return MODE_AUTO;
+    if (displayMode == MODE_NOW && !nowCanEnterMode()) return MODE_AUTO;
     return displayMode;
   }
   if (choice == AUTO_MUSIC) return MODE_MUSIC;
@@ -2051,6 +2113,7 @@ void handleSerialFrame(char *line) {
       else if (m == "stock") displayMode = MODE_STOCK;
       else if (m == "weather") displayMode = MODE_WEATHER;
       else if (m == "quote") displayMode = MODE_QUOTE;
+      else if (m == "now") displayMode = MODE_NOW;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
     return;
@@ -2127,6 +2190,7 @@ void handleRoot() {
   appendModeOption("stock", "股票");
   appendModeOption("weather", "天气");
   appendModeOption("quote", "名人名言");
+  appendModeOption("now", "此刻");
   html += "</select>";
 
   // Backlight brightness slider: applies live on release (PWM, persisted).
@@ -2195,6 +2259,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_STOCK) return "stock";
   if (m == MODE_WEATHER) return "weather";
   if (m == MODE_QUOTE) return "quote";
+  if (m == MODE_NOW) return "now";
   return "auto";
 }
 
@@ -2243,8 +2308,9 @@ void handleApiDisplay() {
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "weather") displayMode = MODE_WEATHER;
   else if (mode == "quote") displayMode = MODE_QUOTE;
+  else if (mode == "now") displayMode = MODE_NOW;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|weather|quote");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|stock|weather|quote|now");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2263,6 +2329,9 @@ void handleApiDisplay() {
   } else if (displayMode == MODE_QUOTE) {
     quoteScreenDrawn = false;
     lastQuotePollMs = 0;
+  } else if (displayMode == MODE_NOW) {
+    nowScreenDrawn = false;
+    lastNowPollMs = 0;
   } else {
     quoteScreenDrawn = false;
     updateActiveApp();
@@ -2674,6 +2743,13 @@ void loop() {
     lastQuotePollMs = nowMs;
     pollQuote();
   }
+  // "NOW" is a manual/fixed page in v1 (not yet in the AUTO scheduler), so its
+  // metadata is polled only while the mode is actually pinned to it.
+  if (WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 && displayMode == MODE_NOW &&
+      (lastNowPollMs == 0 || nowMs - lastNowPollMs >= QUOTE_POLL_INTERVAL_MS)) {
+    lastNowPollMs = nowMs;
+    pollNow();
+  }
 
   // Prime scheduled pages that do not arrive in /status. Once a first valid
   // payload is cached, their normal per-mode poll loops keep them fresh.
@@ -2694,19 +2770,24 @@ void loop() {
   // audio plays). On a transition, reset the incoming mode's chrome so it
   // repaints cleanly, and repaint the pet immediately when returning to it.
   DisplayMode eff = effectiveMode();
-  if (eff == MODE_QUOTE && lastEffectiveMode != MODE_QUOTE) {
-    if (drawQuoteScreen()) {
-      scheduledModeBecameVisible(MODE_QUOTE);
+  const bool bitmapPageEnter = (eff == MODE_QUOTE || eff == MODE_NOW) && lastEffectiveMode != eff;
+  if (bitmapPageEnter) {
+    const DisplayMode failedMode = eff;
+    const bool drawn = eff == MODE_QUOTE ? drawQuoteScreen() : drawNowScreen();
+    if (drawn) {
+      scheduledModeBecameVisible(eff);
     } else {
       // The failed transfer starts a bounded retry delay. Re-run the scheduler
-      // so AUTO can choose another due page (or a fixed quote can keep showing
-      // the pet), and repaint if a short body had overwritten some rows.
+      // so AUTO can choose another due page (or a fixed page can keep showing
+      // the pet), and repaint if a short body had overwritten some rows. Keep
+      // lastEffectiveMode on the failed page so the != transition below fires.
       eff = effectiveMode();
-      lastEffectiveMode = MODE_QUOTE;
+      lastEffectiveMode = failedMode;
     }
   }
   if (eff != lastEffectiveMode) {
     if (lastEffectiveMode == MODE_QUOTE) quoteScreenDrawn = false;
+    if (lastEffectiveMode == MODE_NOW) nowScreenDrawn = false;
     lastEffectiveMode = eff;
     if (eff == MODE_NET) {
       netChromeDrawn = false;
@@ -2722,6 +2803,8 @@ void loop() {
       lastWeatherPollMs = 0;
     } else if (eff == MODE_QUOTE) {
       lastQuotePollMs = 0;
+    } else if (eff == MODE_NOW) {
+      lastNowPollMs = 0;
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -2763,6 +2846,12 @@ void loop() {
       // effectiveMode() will leave quote while this revision is backed off.
     } else {
       scheduledModeBecameVisible(MODE_QUOTE);
+    }
+  } else if (eff == MODE_NOW) {
+    if ((!nowScreenDrawn || nowDirty || nowDrawnRev != nowRev) && !drawNowScreen()) {
+      // effectiveMode() will leave now while this revision is backed off.
+    } else {
+      scheduledModeBecameVisible(MODE_NOW);
     }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
