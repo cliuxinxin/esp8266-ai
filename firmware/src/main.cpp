@@ -66,8 +66,6 @@ const int RING_MARGIN = 4;      // inset from screen edge
 const int RING_THICKNESS = 10;  // ring bar thickness
 const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
-const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
-const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
 
 enum ActiveApp { APP_CLAUDE, APP_CODEX };
 ActiveApp currentApp = APP_CLAUDE;
@@ -933,43 +931,31 @@ void redrawRingOnly() {
 
 // Who gets the screen:
 //   - display mode pinned (Mac app) -> that app, always
-//   - exactly one app working       -> that app, immediately
-//   - both working                  -> alternate every SWITCH_BOTH_MS (2s)
-//   - neither working               -> alternate slowly (SWITCH_IDLE_MS)
+//   - enabled approval request      -> its provider, independently of activity
+//   - only one activity enabled     -> that app, including while idle
+//   - both enabled                  -> working app, or existing fast/slow rotation
 bool updateActiveApp() {
-  ActiveApp desired = currentApp;
-  const bool autoMode = displayMode == MODE_AUTO;
-  const bool approvalsEnabled = !autoMode || autoDisplayRuntime.config.approvalEnabled;
+  AgentDisplaySelectionInputs input;
+  if (displayMode == MODE_CLAUDE) input.mode = AGENT_DISPLAY_FIXED_CLAUDE;
+  else if (displayMode == MODE_CODEX) input.mode = AGENT_DISPLAY_FIXED_CODEX;
+  input.current = currentApp == APP_CLAUDE ? AGENT_DISPLAY_CLAUDE : AGENT_DISPLAY_CODEX;
+  input.claudeEnabled = autoDisplayRuntime.config.claudeEnabled;
+  input.codexEnabled = autoDisplayRuntime.config.codexEnabled;
+  input.approvalEnabled = autoDisplayRuntime.config.approvalEnabled;
+  input.claudeNeedsInput = claudeStatus.needsInput;
+  input.codexNeedsInput = codexStatus.needsInput;
+  input.claudeWorking = claudeStatus.status == "working";
+  input.codexWorking = codexStatus.status == "working";
+  input.nowMs = millis();
+  input.lastSwitchMs = lastSwitchMs;
 
-  if (displayMode == MODE_CLAUDE) {
-    desired = APP_CLAUDE;
-  } else if (displayMode == MODE_CODEX) {
-    desired = APP_CODEX;
-  } else if (approvalsEnabled && claudeStatus.needsInput && !codexStatus.needsInput) {
-    desired = APP_CLAUDE; // approval prompt wins the screen
-  } else if (approvalsEnabled && codexStatus.needsInput && !claudeStatus.needsInput) {
-    desired = APP_CODEX;
-  } else {
-    bool claudeWorking =
-        claudeStatus.status == "working" && (!autoMode || autoDisplayRuntime.config.claudeEnabled);
-    bool codexWorking =
-        codexStatus.status == "working" && (!autoMode || autoDisplayRuntime.config.codexEnabled);
-    if (claudeWorking && !codexWorking) {
-      desired = APP_CLAUDE;
-    } else if (codexWorking && !claudeWorking) {
-      desired = APP_CODEX;
-    } else {
-      unsigned long interval = (claudeWorking && codexWorking) ? SWITCH_BOTH_MS : SWITCH_IDLE_MS;
-      if (millis() - lastSwitchMs >= interval) {
-        lastSwitchMs = millis();
-        desired = (currentApp == APP_CLAUDE) ? APP_CODEX : APP_CLAUDE;
-      }
-    }
-  }
+  const AgentDisplayChoice selected = chooseAgentDisplay(input);
+  const ActiveApp desired =
+      selected == AGENT_DISPLAY_CLAUDE ? APP_CLAUDE : APP_CODEX;
 
   if (desired != currentApp) {
     currentApp = desired;
-    lastSwitchMs = millis();
+    lastSwitchMs = input.nowMs;
     return true;
   }
   return false;

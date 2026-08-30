@@ -48,6 +48,62 @@ struct AutoDisplayConfig {
   };
 };
 
+enum AgentDisplayChoice : uint8_t {
+  AGENT_DISPLAY_CLAUDE,
+  AGENT_DISPLAY_CODEX,
+};
+
+enum AgentDisplayMode : uint8_t {
+  AGENT_DISPLAY_AUTO,
+  AGENT_DISPLAY_FIXED_CLAUDE,
+  AGENT_DISPLAY_FIXED_CODEX,
+};
+
+constexpr uint32_t AGENT_DISPLAY_BOTH_WORKING_SWITCH_MS = 2000U;
+constexpr uint32_t AGENT_DISPLAY_IDLE_SWITCH_MS = 6000U;
+
+struct AgentDisplaySelectionInputs {
+  AgentDisplayMode mode = AGENT_DISPLAY_AUTO;
+  AgentDisplayChoice current = AGENT_DISPLAY_CLAUDE;
+  bool claudeEnabled = false;
+  bool codexEnabled = true;
+  bool approvalEnabled = true;
+  bool claudeNeedsInput = false;
+  bool codexNeedsInput = false;
+  bool claudeWorking = false;
+  bool codexWorking = false;
+  uint32_t nowMs = 0;
+  uint32_t lastSwitchMs = 0;
+};
+
+inline AgentDisplayChoice chooseAgentDisplay(const AgentDisplaySelectionInputs &input) {
+  if (input.mode == AGENT_DISPLAY_FIXED_CLAUDE) return AGENT_DISPLAY_CLAUDE;
+  if (input.mode == AGENT_DISPLAY_FIXED_CODEX) return AGENT_DISPLAY_CODEX;
+
+  // Approval is an independent event switch. When enabled, its requesting
+  // provider may appear even when that provider's normal activity is disabled.
+  if (input.approvalEnabled) {
+    if (input.claudeNeedsInput && !input.codexNeedsInput) return AGENT_DISPLAY_CLAUDE;
+    if (input.codexNeedsInput && !input.claudeNeedsInput) return AGENT_DISPLAY_CODEX;
+  }
+
+  if (input.claudeEnabled && !input.codexEnabled) return AGENT_DISPLAY_CLAUDE;
+  if (input.codexEnabled && !input.claudeEnabled) return AGENT_DISPLAY_CODEX;
+  if (!input.claudeEnabled && !input.codexEnabled) return input.current;
+
+  if (input.claudeWorking && !input.codexWorking) return AGENT_DISPLAY_CLAUDE;
+  if (input.codexWorking && !input.claudeWorking) return AGENT_DISPLAY_CODEX;
+
+  const uint32_t intervalMs =
+      (input.claudeWorking && input.codexWorking)
+          ? AGENT_DISPLAY_BOTH_WORKING_SWITCH_MS
+          : AGENT_DISPLAY_IDLE_SWITCH_MS;
+  if (static_cast<uint32_t>(input.nowMs - input.lastSwitchMs) < intervalMs) {
+    return input.current;
+  }
+  return input.current == AGENT_DISPLAY_CLAUDE ? AGENT_DISPLAY_CODEX : AGENT_DISPLAY_CLAUDE;
+}
+
 struct ScheduledPageState {
   uint32_t dueMs = 0;
   uint32_t untilMs = 0;

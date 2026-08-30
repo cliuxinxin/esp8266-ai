@@ -45,6 +45,131 @@ void testApprovalsCanBeDisabled() {
   assert(chooseAutoDisplay(in) == AUTO_APPROVAL);
 }
 
+void testAutoAgentSelectionPinsOnlyEnabledCodexWhileIdle() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = false;
+  in.codexEnabled = true;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  in.nowMs = 6000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+
+  in.current = AGENT_DISPLAY_CODEX;
+  in.nowMs = 12000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
+void testAutoAgentSelectionPinsOnlyEnabledClaudeWhileIdle() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = true;
+  in.codexEnabled = false;
+  in.current = AGENT_DISPLAY_CODEX;
+  in.nowMs = 6000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.current = AGENT_DISPLAY_CLAUDE;
+  in.nowMs = 12000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+}
+
+void testBothEnabledIdleAgentsKeepSlowAlternation() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = true;
+  in.codexEnabled = true;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  in.nowMs = 5999;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.nowMs = 6000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
+void testOnlyEnabledWorkingAgentIsSelected() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = false;
+  in.codexEnabled = true;
+  in.codexWorking = true;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+
+  in.claudeEnabled = true;
+  in.codexEnabled = false;
+  in.claudeWorking = true;
+  in.codexWorking = false;
+  in.current = AGENT_DISPLAY_CODEX;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+}
+
+void testExactlyOneWorkingOfBothEnabledAgentsIsSelected() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = true;
+  in.codexEnabled = true;
+  in.claudeWorking = true;
+  in.current = AGENT_DISPLAY_CODEX;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.claudeWorking = false;
+  in.codexWorking = true;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
+void testBothEnabledWorkingAgentsKeepFastAlternation() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = true;
+  in.codexEnabled = true;
+  in.claudeWorking = true;
+  in.codexWorking = true;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  in.nowMs = 1999;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.nowMs = 2000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
+void testFixedAgentDisplayIgnoresAutoEnablementAndActivity() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = false;
+  in.codexEnabled = false;
+  in.codexWorking = true;
+  in.codexNeedsInput = true;
+  in.current = AGENT_DISPLAY_CODEX;
+  in.mode = AGENT_DISPLAY_FIXED_CLAUDE;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.claudeWorking = true;
+  in.claudeNeedsInput = true;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  in.mode = AGENT_DISPLAY_FIXED_CODEX;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
+void testApprovalSwitchIndependentlyAllowsRequestingDisabledAgent() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = false;
+  in.codexEnabled = true;
+  in.approvalEnabled = true;
+  in.claudeNeedsInput = true;
+  in.current = AGENT_DISPLAY_CODEX;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.approvalEnabled = false;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
+void testNoEnabledAgentKeepsCurrentIdlePet() {
+  AgentDisplaySelectionInputs in{};
+  in.claudeEnabled = false;
+  in.codexEnabled = false;
+  in.current = AGENT_DISPLAY_CLAUDE;
+  in.nowMs = 6000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CLAUDE);
+
+  in.current = AGENT_DISPLAY_CODEX;
+  in.nowMs = 12000;
+  assert(chooseAgentDisplay(in) == AGENT_DISPLAY_CODEX);
+}
+
 void testPriorityAndFairScheduledChoice() {
   AutoSelectionInputs in{};
   in.config.codexEnabled = true;
@@ -346,6 +471,15 @@ int main() {
   testLegacyBridgeDefaults();
   testClaudeCanBeDisabled();
   testApprovalsCanBeDisabled();
+  testAutoAgentSelectionPinsOnlyEnabledCodexWhileIdle();
+  testAutoAgentSelectionPinsOnlyEnabledClaudeWhileIdle();
+  testBothEnabledIdleAgentsKeepSlowAlternation();
+  testOnlyEnabledWorkingAgentIsSelected();
+  testExactlyOneWorkingOfBothEnabledAgentsIsSelected();
+  testBothEnabledWorkingAgentsKeepFastAlternation();
+  testFixedAgentDisplayIgnoresAutoEnablementAndActivity();
+  testApprovalSwitchIndependentlyAllowsRequestingDisabledAgent();
+  testNoEnabledAgentKeepsCurrentIdlePet();
   testPriorityAndFairScheduledChoice();
   testAllItemsCanBeDisabled();
   testDisabledQuoteIsNeverSelected();
