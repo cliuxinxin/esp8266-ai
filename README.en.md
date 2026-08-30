@@ -32,7 +32,9 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
-The display also includes an **enhanced weather page** and a **daily quote page**. Weather covers current/feels-like/high/low temperature, humidity, wind, AQI, precipitation probability, and a three-day forecast. Quotes alternate between Chinese Hitokoto and English ZenQuotes, with the last successful result kept for offline use.
+The display also includes an **enhanced weather page**, a **daily quote page**, and a composite **Now** page. Weather covers current/feels-like/high/low temperature, humidity, wind, AQI, precipitation probability, and a three-day forecast. Quotes alternate between Chinese Hitokoto and English ZenQuotes, with the last successful result kept for offline use. Now combines a quote, weather summary, and Codex weekly quota on one always-on screen.
+
+> Automatic display, weather, quotes, and Now currently require the **macOS bridge**. The Windows bridge supports Claude/Codex activity and quota, music, network speed, stocks, pets, and display control. Keep the firmware and bridge app on the same Release version.
 
 ## Getting started
 
@@ -59,11 +61,55 @@ Download from [Releases](https://github.com/pengchujin/esp8266-ai/releases/lates
 
 The bridge lives in your menu bar / tray and **auto-discovers and pairs** with the device on the same LAN — at this point the screen comes alive.
 
+## Upgrading an existing installation
+
+Update both the **desktop bridge** and the **ESP8266 firmware**. Updating only one side can leave new pages or automatic-display settings unavailable. A normal upgrade preserves WiFi, bridge address, brightness, and custom pets; do not run `erase_flash` unless you are troubleshooting.
+
+1. Quit the old AIClockBridge.
+2. Open the [latest Release](https://github.com/pengchujin/esp8266-ai/releases/latest) and install `AIClockBridge-*-macOS.dmg` or `AIClockBridge-*-Windows-x64.exe` for your system.
+3. Update `esp8266-ai-firmware-*.bin` with one of the methods below, then reopen the bridge.
+4. Check that the device is online from the menu bar/tray. Its web page shows the firmware version. If pairing was not restored automatically, choose “Set this Mac/PC as device bridge.”
+
+### Method A: Web flasher (recommended)
+
+Open the [web flasher](https://mac.qust.me/#flash) in Chrome or Edge, connect the device with a USB **data** cable, click Connect & Flash, select its CH340 serial port, and wait for the reboot. The flasher installs the stable firmware currently published by the website; immediately after a release, check that its displayed version matches the GitHub Release.
+
+### Method B: Flash the Release `.bin`
+
+Install [esptool](https://docs.espressif.com/projects/esptool/en/latest/esp8266/installation.html), download `esp8266-ai-firmware-*.bin` from the latest Release, then run:
+
+```bash
+python3 -m esptool --chip esp8266 --port /dev/cu.usbserial-your-port \
+  --baud 460800 write_flash 0x0 esp8266-ai-firmware-*.bin
+```
+
+On Windows, use the actual port such as `COM3`. If high-speed writes are unreliable, change `460800` to `115200`. Do not select the DMG, EXE, or source archive as firmware.
+
+### Method C: Build and flash from source
+
+For development builds or local modifications, install [PlatformIO](https://platformio.org/install/cli), then run:
+
+```bash
+git switch main
+git pull --ff-only origin main
+cd firmware
+pio device list
+pio run -t upload --upload-port /dev/cu.usbserial-your-port
+```
+
+The board reboots after flashing. If the port disappears, reconnect USB. If the bridge remains offline, verify that both devices are on the same LAN and set the Bridge host again.
+
 <p align="center">
   <img src="docs/images/working.jpg" width="640" alt="In action">
 </p>
 
 Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, weather city, pet swapping, music/network pages, and more).
+
+### Now composite page
+
+On macOS, choose **Display → 此刻 (Now)** from the menu bar, or select 此刻 at the bottom of the mirror. It shows the current quote, a weather summary, and Codex weekly quota/reset time. The device refreshes the bitmap only when visible data changes.
+
+Now requires **firmware v0.4.13 or newer** and the matching Mac bridge. It is currently a manually pinned page rather than part of AUTO rotation. If no displayable quote has been fetched yet, the device temporarily stays on AUTO/the pet until content becomes available.
 
 ### Automatic display and quotes
 
@@ -90,7 +136,7 @@ The Mac bridge alternates between Chinese quotes from Hitokoto and English quote
 
 Choose **Display → Weather** for a fixed weather page, or **Set weather city…** to search for a city (Chengdu is the default). The bridge refreshes weather about every 10 minutes and keeps its last successful cache through temporary network failures. Weather is enabled in AUTO mode by default as shown above.
 
-### Updating from source (macOS)
+### Running the latest bridge from source (macOS)
 
 Quit any installed AIClockBridge from the menu bar first so it does not keep port 8765 occupied, then update and launch the bridge:
 
@@ -109,20 +155,14 @@ swift build -c release
 .build/release/AIClockBridge
 ```
 
-Connect the ESP8266 with a USB data cable, list the available serial ports, then build and flash:
-
-```bash
-cd firmware
-pio device list
-pio run -t upload
-```
-
-If the project default `/dev/cu.usbserial-130` does not match your device, add `--upload-port /dev/cu.usbserial-your-port`. After flashing, the board reboots automatically; use its `AI-Clock-Setup` hotspot if WiFi still needs configuration.
+Follow “Upgrading an existing installation” above to flash the firmware. After flashing, use the `AI-Clock-Setup` hotspot if WiFi still needs configuration.
 
 ## FAQ
 
 - **Screen border flashing red**: the device can't reach the bridge — make sure the app is running and on the same WiFi.
 - **Quota shows `-` forever**: no Claude Code / Codex CLI login on this machine, so the bridge has no credentials to read.
+- **Now or automatic-display settings are missing**: update both the Mac bridge and firmware to v0.4.13 or newer. Windows does not yet provide the complete weather, quote, and Now data sources.
+- **Port 8765 is already in use**: choose “服务端口… (Service port…)” from the menu bar/tray, change it to 8766, restart the bridge, and pair it once more. No firmware reflash is needed.
 - **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
 
 ## Development
