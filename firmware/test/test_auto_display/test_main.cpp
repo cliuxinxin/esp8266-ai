@@ -222,9 +222,11 @@ void testSerialMetadataCannotConfirmOrResetHTTPBitmapTransport() {
   QuoteBitmapFetchState state{};
 
   noteQuoteMetadataReceived(state, QUOTE_METADATA_SERIAL);
+  assert(state.httpReachability == QUOTE_HTTP_UNKNOWN);
   assert(!quoteBitmapFetchAllowed(state, 100));
 
   noteQuoteMetadataReceived(state, QUOTE_METADATA_HTTP);
+  assert(state.httpReachability == QUOTE_HTTP_CONFIRMED);
   assert(quoteBitmapFetchAllowed(state, 100));
   noteQuoteBitmapFetchFailure(state, 100);
   const uint32_t retryAfter = state.retryAfterMs;
@@ -246,17 +248,76 @@ void testSerialMetadataCannotConfirmOrResetHTTPBitmapTransport() {
   assert(quoteBitmapFetchAllowed(state, retryAfter));
 }
 
-void testQuoteMetadataHTTPPollIsSkippedWhileWiredTransportIsActive() {
+void testWiredSerialFirstQuoteAllowsHTTPBootstrapProbe() {
+  QuoteBitmapFetchState state{};
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_SERIAL);
+  assert(!quoteBitmapFetchAllowed(state, 100));
+
+  QuoteMetadataPollInputs input{};
+  input.wifiConnected = true;
+  input.bridgeConfigured = true;
+  input.modeNeedsQuote = true;
+  input.wiredActive = true;
+  assert(!shouldPollQuoteMetadataHTTP(input, state, 100));
+
+  input.intervalElapsed = true;
+  assert(shouldPollQuoteMetadataHTTP(input, state, 100));
+
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_HTTP);
+  assert(state.httpReachability == QUOTE_HTTP_CONFIRMED);
+  assert(quoteBitmapFetchAllowed(state, 100));
+  assert(!shouldPollQuoteMetadataHTTP(input, state, 100));
+}
+
+void testFailedHTTPReachabilityProbeObeysBackoff() {
+  QuoteBitmapFetchState state{};
+  noteQuoteHTTPMetadataFailure(state, 100);
+  assert(state.httpReachability == QUOTE_HTTP_FAILED);
+  assert(state.failureCount == 1);
+  assert(state.retryAfterMs == 5100);
+
   QuoteMetadataPollInputs input{};
   input.wifiConnected = true;
   input.bridgeConfigured = true;
   input.modeNeedsQuote = true;
   input.intervalElapsed = true;
   input.wiredActive = true;
-  assert(!shouldPollQuoteMetadataHTTP(input));
+  assert(!shouldPollQuoteMetadataHTTP(input, state, 5099));
+  assert(shouldPollQuoteMetadataHTTP(input, state, 5100));
+}
 
+void testSerialMetadataPreservesHTTPFailureUntilHTTPConfirmsReachability() {
+  QuoteBitmapFetchState state{};
+  noteQuoteHTTPMetadataFailure(state, 100);
+  const uint32_t retryAfter = state.retryAfterMs;
+
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_SERIAL);
+  assert(state.httpReachability == QUOTE_HTTP_FAILED);
+  assert(state.failureCount == 1);
+  assert(state.retryAfterMs == retryAfter);
+  assert(!quoteBitmapFetchAllowed(state, retryAfter - 1));
+
+  noteQuoteMetadataReceived(state, QUOTE_METADATA_HTTP);
+  assert(state.httpReachability == QUOTE_HTTP_CONFIRMED);
+  assert(state.failureCount == 1);
+  assert(state.retryAfterMs == retryAfter);
+  assert(!quoteBitmapFetchAllowed(state, retryAfter - 1));
+  assert(quoteBitmapFetchAllowed(state, retryAfter));
+}
+
+void testUnwiredQuoteMetadataRefreshKeepsItsIntervalPolicy() {
+  QuoteBitmapFetchState state{};
+  noteQuoteHTTPReachable(state);
+
+  QuoteMetadataPollInputs input{};
+  input.wifiConnected = true;
+  input.bridgeConfigured = true;
+  input.modeNeedsQuote = true;
   input.wiredActive = false;
-  assert(shouldPollQuoteMetadataHTTP(input));
+  assert(!shouldPollQuoteMetadataHTTP(input, state, 100));
+
+  input.intervalElapsed = true;
+  assert(shouldPollQuoteMetadataHTTP(input, state, 100));
 }
 
 void testFixedModeDoesNotRunAutoScheduler() {
@@ -297,7 +358,10 @@ int main() {
   testInterruptedPageRestartsWithFullDuration();
   testScheduledDeadlineStartsAfterFirstSuccessfulDraw();
   testSerialMetadataCannotConfirmOrResetHTTPBitmapTransport();
-  testQuoteMetadataHTTPPollIsSkippedWhileWiredTransportIsActive();
+  testWiredSerialFirstQuoteAllowsHTTPBootstrapProbe();
+  testFailedHTTPReachabilityProbeObeysBackoff();
+  testSerialMetadataPreservesHTTPFailureUntilHTTPConfirmsReachability();
+  testUnwiredQuoteMetadataRefreshKeepsItsIntervalPolicy();
   testFixedModeDoesNotRunAutoScheduler();
   return 0;
 }

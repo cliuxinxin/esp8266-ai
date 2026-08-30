@@ -1755,14 +1755,14 @@ void pollQuote() {
   HTTPClient http;
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, "http://" + bridgeHost + "/quote")) {
-    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState, millis());
     return;
   }
   if (http.GET() == HTTP_CODE_OK) {
     noteQuoteHTTPReachable(quoteBitmapFetchState);
     handleQuotePayload(http.getString(), QUOTE_METADATA_HTTP);
   } else {
-    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState, millis());
   }
   http.end();
 }
@@ -1944,7 +1944,7 @@ void scheduledModeBecameVisible(DisplayMode mode) {
 
 void pollBridge() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
-    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState, millis());
     Serial.printf("[bridge] skip poll: wifi=%d host='%s'\n", WiFi.status() == WL_CONNECTED, bridgeHost.c_str());
     return;
   }
@@ -1955,7 +1955,7 @@ void pollBridge() {
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
 
   if (!http.begin(client, url)) {
-    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState, millis());
     Serial.println("[bridge] http.begin() failed");
     return;
   }
@@ -1974,7 +1974,7 @@ void pollBridge() {
       Serial.println("[bridge] JSON parse failed");
     }
   } else {
-    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState);
+    noteQuoteHTTPMetadataFailure(quoteBitmapFetchState, millis());
     claudeStatus.status = "offline";
     codexStatus.status = "offline";
   }
@@ -2684,7 +2684,7 @@ void loop() {
   quotePollInputs.intervalElapsed =
       lastQuotePollMs == 0 || nowMs - lastQuotePollMs >= QUOTE_POLL_INTERVAL_MS;
   quotePollInputs.wiredActive = wiredActive();
-  if (shouldPollQuoteMetadataHTTP(quotePollInputs)) {
+  if (shouldPollQuoteMetadataHTTP(quotePollInputs, quoteBitmapFetchState, nowMs)) {
     lastQuotePollMs = nowMs;
     pollQuote();
   }
@@ -2825,8 +2825,8 @@ void loop() {
   }
 
   // status poll continues in every mode (feeds /api/info and the web page).
-  // Wired-first: while serial frames are flowing, skip HTTP polling entirely
-  // (works around AP client isolation, and avoids double updates).
+  // Wired-first: while serial frames are flowing, skip the periodic /status
+  // poll (works around AP client isolation, and avoids double updates).
   if (nowMs - lastPollMs >= BRIDGE_POLL_INTERVAL_MS) {
     lastPollMs = nowMs;
     if (!wiredActive()) pollBridge();
