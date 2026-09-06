@@ -54,7 +54,7 @@ weatherMonitor.start()
 let quoteMonitor = QuoteMonitor()
 quoteMonitor.start()
 let nowMonitor = NowPageMonitor(quoteMonitor: quoteMonitor, weatherMonitor: weatherMonitor,
-                                usage: usage)
+                                codexUsageProvider: { service.codexUsageSnapshot() })
 nowMonitor.start()
 
 // Wired fallback: if the clock is plugged in over USB, push status/net down

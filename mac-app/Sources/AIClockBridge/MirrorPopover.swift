@@ -74,8 +74,8 @@ final class MirrorView: NSView {
     var ringPct: Double = 0
     var needsInput = false // shown app waiting on approval -> red border flash
     var flashOn = false
-    var line1 = "5h -"
-    var line2 = "Weekly -"
+    var line1 = "周 -"
+    var line2 = ""
     var showingClaude = true
     var deviceOK = false
     // net-mode mirror: same scrolling area-chart model as the firmware —
@@ -815,18 +815,18 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                     ? 100.0 * Double(snap.claude.sessionMin) / Double(snap.claude.sessionWindowMin) : 0)
             mirror.ringPct = pct
             mirror.line1 = "5h " + Self.pctText(pct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
+            mirror.line2 = "7天 " + Self.pctText(snap.claude.sevenDayPct)
             mirror.needsInput = snap.claude.needsInput
         } else {
-            // Codex may only have a weekly window now (5h limit dropped):
-            // ring + single line follow whatever windows actually exist.
-            mirror.ringPct = snap.codex.primaryPct ?? snap.codex.weeklyPct ?? 0
-            if snap.codex.primaryPct == nil, snap.codex.weeklyPct != nil {
-                mirror.line1 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+            // Codex now uses weekly quota (通用使用份额) as the only primary display.
+            let codexMainPct = snap.codex.weeklyPct
+            mirror.ringPct = codexMainPct ?? 0
+            if let weekly = snap.codex.weeklyPct {
+                mirror.line1 = "周剩余 " + Self.pctText(Self.remainingPercent(weekly))
                 mirror.line2 = ""
             } else {
-                mirror.line1 = "5h " + Self.pctText(snap.codex.primaryPct)
-                mirror.line2 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+                mirror.line1 = "周剩余 " + Self.pctText(nil)
+                mirror.line2 = ""
             }
             mirror.needsInput = snap.codex.needsInput
         }
@@ -836,6 +836,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private static func pctText(_ pct: Double?) -> String {
         guard let p = pct, p >= 0 else { return "-" }
         return "\(Int(p))%"
+    }
+
+    private static func remainingPercent(_ pct: Double) -> Double {
+        max(0, 100 - pct)
     }
 
     private func ensureSprite(_ info: DeviceInfo) {

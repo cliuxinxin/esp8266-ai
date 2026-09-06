@@ -44,14 +44,15 @@ struct QuoteSnapshot: Codable, Equatable {
 }
 
 final class QuoteMonitor {
-    private static let hitokotoURL = URL(string: "https://v1.hitokoto.cn/?encode=json&c=d&c=k")!
-    private static let zenQuotesURL = URL(string: "https://zenquotes.io/api/random")!
+    private static let hitokotoURL = URL(
+        string: "https://v1.hitokoto.cn/?encode=json&c=d&c=k&c=i&c=e&c=g&c=h&max_length=45"
+    )!
     private static let maxRecentTexts = 20
     private static let maxContentAttempts = 3
     private static let cacheVersion = 1
     // 内容更换间隔。原为 30 分钟，但名言页每 2 分钟露一次面、每次 30 秒，
     // 同一句会重复出现十几次；做成「此刻」常驻页后更等于半小时不变的静态
-    // 卡片，所以缩短到 5 分钟。两个来源交替请求，实际每个源约 6 次/小时。
+    // 卡片，所以缩短到 5 分钟。
     private static let refreshInterval: TimeInterval = 5 * 60
 
     private let client: QuoteHTTPClient
@@ -63,7 +64,6 @@ final class QuoteMonitor {
     private var storedSnapshot: QuoteSnapshot?
     private var storedText = Data()
     private var latestChinese: QuoteSnapshot?
-    private var latestEnglish: QuoteSnapshot?
     private var recentTexts: [String] = []
     private var refreshInFlight = false
     private var refreshPending = false
@@ -81,7 +81,6 @@ final class QuoteMonitor {
         self.errorReporter = errorReporter
         let loadedCache = Self.loadCache(from: self.cacheURL)
         latestChinese = loadedCache.envelope.latestChinese
-        latestEnglish = loadedCache.envelope.latestEnglish
         recentTexts = loadedCache.envelope.recentTexts
         if let cached = loadedCache.envelope.currentSnapshot {
             storedSnapshot = cached
@@ -118,13 +117,10 @@ final class QuoteMonitor {
             }
         }
 
-        let preferredLanguage = withStateLock { storedSnapshot?.language == "zh" ? "en" : "zh" }
-        let fallbackLanguage = preferredLanguage == "zh" ? "en" : "zh"
         var lastError: Error?
-        for attempt in 0..<Self.maxContentAttempts {
+        for _ in 0..<Self.maxContentAttempts {
             do {
-                let language = attempt.isMultiple(of: 2) ? preferredLanguage : fallbackLanguage
-                let quote = try await fetch(language: language)
+                let quote = try await fetch()
                 guard Self.isDisplayable(quote) else {
                     lastError = QuoteMonitorError.notDisplayable
                     continue
@@ -155,17 +151,9 @@ final class QuoteMonitor {
                              updatedAt: Date(), textRev: 0)
     }
 
-    static func parseZenQuotes(_ data: Data) throws -> QuoteSnapshot {
-        guard let response = try JSONDecoder().decode([ZenQuoteResponse].self, from: data).first else {
-            throw QuoteMonitorError.emptyResponse
-        }
-        return QuoteSnapshot(text: normalizedText(response.text), author: normalized(response.author) ?? "Anonymous",
-                             language: "en", updatedAt: Date(), textRev: 0)
-    }
-
-    private func fetch(language: String) async throws -> QuoteSnapshot {
-        let data = try await client.data(from: language == "zh" ? Self.hitokotoURL : Self.zenQuotesURL)
-        let parsed = try (language == "zh" ? Self.parseHitokoto(data) : Self.parseZenQuotes(data))
+    private func fetch() async throws -> QuoteSnapshot {
+        let data = try await client.data(from: Self.hitokotoURL)
+        let parsed = try Self.parseHitokoto(data)
         let oldRevision = withStateLock { storedSnapshot?.textRev ?? 0 }
         return QuoteSnapshot(text: parsed.text, author: parsed.author, language: parsed.language,
                              updatedAt: nowProvider(), textRev: oldRevision + 1)
@@ -176,11 +164,7 @@ final class QuoteMonitor {
         let envelope = withStateLock {
             storedSnapshot = quote
             storedText = rendered
-            if quote.language == "zh" {
-                latestChinese = quote
-            } else {
-                latestEnglish = quote
-            }
+            latestChinese = quote
             appendRecent(quote.text)
             return cacheEnvelope()
         }
@@ -217,7 +201,7 @@ final class QuoteMonitor {
 
     private func cacheEnvelope() -> QuoteCacheEnvelope {
         QuoteCacheEnvelope(version: Self.cacheVersion, latestChinese: latestChinese,
-                           latestEnglish: latestEnglish, recentTexts: recentTexts)
+                           latestEnglish: nil, recentTexts: recentTexts)
     }
 
     private static func loadCache(from cacheURL: URL) -> LoadedQuoteCache {
@@ -225,14 +209,19 @@ final class QuoteMonitor {
         if var envelope = try? JSONDecoder().decode(QuoteCacheEnvelope.self, from: data),
            envelope.version == cacheVersion {
             envelope.normalize(maxRecentTexts: maxRecentTexts)
-            return LoadedQuoteCache(envelope: envelope, migratedLegacySnapshot: false)
+            let discardedEnglish = envelope.latestEnglish != nil
+            envelope.latestEnglish = nil
+            if discardedEnglish {
+                envelope.recentTexts = envelope.latestChinese.map { [$0.text] } ?? []
+            }
+            return LoadedQuoteCache(envelope: envelope, migratedLegacySnapshot: discardedEnglish)
         }
         if let legacy = try? JSONDecoder().decode(QuoteSnapshot.self, from: data) {
             let envelope = QuoteCacheEnvelope(
                 version: cacheVersion,
                 latestChinese: legacy.language == "zh" ? legacy : nil,
-                latestEnglish: legacy.language == "en" ? legacy : nil,
-                recentTexts: [legacy.text]
+                latestEnglish: nil,
+                recentTexts: legacy.language == "zh" ? [legacy.text] : []
             )
             return LoadedQuoteCache(envelope: envelope, migratedLegacySnapshot: true)
         }
@@ -312,10 +301,7 @@ private struct QuoteCacheEnvelope: Codable {
     }
 
     var currentSnapshot: QuoteSnapshot? {
-        [latestChinese, latestEnglish].compactMap { $0 }.max {
-            if $0.textRev != $1.textRev { return $0.textRev < $1.textRev }
-            return $0.updatedAt < $1.updatedAt
-        }
+        latestChinese
     }
 
     mutating func normalize(maxRecentTexts: Int) {
@@ -359,15 +345,5 @@ private struct HitokotoResponse: Decodable {
         case text = "hitokoto"
         case source = "from"
         case fromWho = "from_who"
-    }
-}
-
-private struct ZenQuoteResponse: Decodable {
-    let text: String
-    let author: String?
-
-    enum CodingKeys: String, CodingKey {
-        case text = "q"
-        case author = "a"
     }
 }

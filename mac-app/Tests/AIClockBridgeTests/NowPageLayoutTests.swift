@@ -2,6 +2,21 @@ import XCTest
 @testable import AIClockBridge
 
 final class NowPageLayoutTests: XCTestCase {
+    private func renderedLines(_ run: QuoteTextRun) -> [String] {
+        let attributed = NSAttributedString(string: run.text, attributes: run.attributes)
+        let framesetter = CTFramesetterCreateWithAttributedString(attributed)
+        let path = CGPath(rect: CGRect(x: 0, y: 0, width: run.rect.width,
+                                       height: .greatestFiniteMagnitude), transform: nil)
+        let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), path, nil)
+        let text = run.text as NSString
+        return (CTFrameGetLines(frame) as NSArray).compactMap { value in
+            let range = CTLineGetStringRange(value as! CTLine)
+            guard range.location != kCFNotFound else { return nil }
+            return text.substring(with: NSRange(location: range.location, length: range.length))
+                .trimmingCharacters(in: .newlines)
+        }
+    }
+
     private func quote(text: String, author: String, language: String,
                        revision: Int = 1) -> QuoteSnapshot {
         QuoteSnapshot(text: text, author: author, language: language,
@@ -35,11 +50,11 @@ final class NowPageLayoutTests: XCTestCase {
 
     func testWeatherLine1FormatsCityTempAndCondition() {
         XCTAssertEqual(NowPageLayout.weatherLine1Text(weather()),
-                       "☀ 成都 22°C 晴")
+                       "☀ 成都 · 22°C · 晴")
         XCTAssertEqual(NowPageLayout.weatherLine1Text(weather(code: 3)),
-                       "☁ 成都 22°C 阴")
+                       "☁ 成都 · 22°C · 阴")
         XCTAssertEqual(NowPageLayout.weatherLine1Text(weather(temperature: nil)),
-                       "☀ 成都 -- 晴")
+                       "☀ 成都 · -- · 晴")
         XCTAssertEqual(NowPageLayout.weatherLine1Text(nil), "天气暂无数据")
     }
 
@@ -59,16 +74,27 @@ final class NowPageLayoutTests: XCTestCase {
         XCTAssertEqual(NowPageLayout.codexResetText(codex(weeklyResetMin: 300)), "5时")
         XCTAssertEqual(NowPageLayout.codexResetText(codex(weeklyResetMin: 74 * 60 + 30)), "3天2时")
         XCTAssertEqual(NowPageLayout.codexResetText(codex(weeklyResetMin: 48 * 60)), "2天")
-        XCTAssertEqual(NowPageLayout.codexResetText(codex(weeklyResetMin: nil)), "--")
+        XCTAssertEqual(NowPageLayout.codexResetText(codex(weeklyResetMin: nil)), "")
+    }
+
+    func testMissingCodexUsageUsesOneClearEmptyState() {
+        let base = quote(text: "生活不止眼前的苟且", author: "高晓松", language: "zh")
+        let missing = ProviderUsage(primaryPct: nil, primaryResetMin: nil,
+                                    weeklyPct: nil, weeklyResetMin: nil,
+                                    error: nil, fetchedAt: nil)
+        let layout = NowPageLayout.make(for: data(quote: base, codex: missing))
+
+        XCTAssertEqual(layout?.codexPct.text, "暂无数据")
+        XCTAssertEqual(layout?.codexReset.text, "")
     }
 
     func testCodexPctPrefersWeeklyWindow() {
         let base = quote(text: "生活不止眼前的苟且", author: "高晓松", language: "zh")
         let both = codex(weeklyPct: 42, primaryPct: 10)
         let pct = NowPageLayout.make(for: data(quote: base, codex: both))?.codexPct.text ?? ""
-        XCTAssertEqual(pct, "42%")
+        XCTAssertEqual(pct, "余58%")
         let weeklyOnly = codex(weeklyPct: 88)
-        XCTAssertEqual(NowPageLayout.make(for: data(quote: base, codex: weeklyOnly))?.codexPct.text, "88%")
+        XCTAssertEqual(NowPageLayout.make(for: data(quote: base, codex: weeklyOnly))?.codexPct.text, "余12%")
     }
 
     // MARK: - header
@@ -76,8 +102,21 @@ final class NowPageLayoutTests: XCTestCase {
     func testHeaderDateIsCompact() {
         let d = Date(timeIntervalSince1970: 1_724_500_000)
         let text = NowPageLayout.headerDateText(d)
-        XCTAssertTrue(text.range(of: #"^\d{2}-\d{2} \d{2}:\d{2}$"#, options: .regularExpression) != nil,
+        XCTAssertTrue(text.range(of: #"^\d{2}\.\d{2} · \d{2}:\d{2}$"#, options: .regularExpression) != nil,
                       "unexpected header date format: \(text)")
+    }
+
+    func testHeaderDateFitsWithoutTruncation() throws {
+        let layout = try XCTUnwrap(NowPageLayout.make(for: data(quote: quote(
+            text: "山高水长", author: "古语", language: "zh"))))
+        let run = layout.headerDate
+        let bounds = (run.text as NSString).boundingRect(
+            with: NSSize(width: .greatestFiniteMagnitude, height: run.rect.height),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: run.attributes
+        )
+
+        XCTAssertLessThanOrEqual(ceil(bounds.width), run.rect.width)
     }
 
     // MARK: - layout geometry
@@ -104,6 +143,34 @@ final class NowPageLayoutTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(layout!.body.rect.height, 1)
         XCTAssertLessThanOrEqual(layout!.body.rect.height, 120)
         XCTAssertLessThanOrEqual(layout!.body.rect.maxY, 240)
+    }
+
+    func testChineseQuoteNeverLeavesPunctuationOnlyLine() throws {
+        let layout = try XCTUnwrap(NowPageLayout.make(for: data(quote: quote(
+            text: "漫天风雪我陪你颤抖，我们别回头。", author: "林俊杰", language: "zh"))))
+        let punctuation = CharacterSet(charactersIn: "，。！？、；：“”‘’（）【】《》「」『』,.!?;:")
+        let lines = renderedLines(layout.body)
+
+        XCTAssertFalse(lines.isEmpty)
+        XCTAssertTrue(lines.allSatisfy {
+            !$0.trimmingCharacters(in: punctuation.union(.whitespacesAndNewlines)).isEmpty
+        }, "punctuation-only line in \(lines)")
+    }
+
+    func testChineseQuotePrefersClauseBoundaryOverSplittingAWord() throws {
+        let layout = try XCTUnwrap(NowPageLayout.make(for: data(quote: quote(
+            text: "漫天风雪我陪你颤抖，我们别回头。", author: "林俊杰", language: "zh"))))
+
+        XCTAssertEqual(renderedLines(layout.body), ["“漫天风雪我陪你颤抖，", "我们别回头。”"])
+    }
+
+    func testLongChineseQuoteDoesNotForceAnImpossibleTwoLineClauseBreak() throws {
+        let text = String(repeating: "长", count: 30) + "，" + String(repeating: "远", count: 29)
+        let layout = try XCTUnwrap(NowPageLayout.make(for: data(quote: quote(
+            text: text, author: "作者", language: "zh"))))
+
+        XCTAssertTrue(layout.fits)
+        XCTAssertGreaterThan(renderedLines(layout.body).count, 2)
     }
 
     func testOverLimitQuoteReturnsNil() {
@@ -143,5 +210,14 @@ final class NowPageLayoutTests: XCTestCase {
                           NowPageLayout.rev(for: data(quote: quote(text: "山高水长", author: "古语", language: "zh", revision: 4))))
         XCTAssertNotEqual(NowPageLayout.rev(for: a),
                           NowPageLayout.rev(for: data(codex: codex(weeklyPct: 88, weeklyResetMin: 342))))
+    }
+
+    func testNowMetadataPublishesLayoutRevisionForDeviceCacheInvalidation() throws {
+        let json = NowPageMonitor.metadataJSON(revision: 37, available: true)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
+
+        XCTAssertEqual(object["rev"] as? Int, 37)
+        XCTAssertEqual(object["layout_rev"] as? Int, 2)
+        XCTAssertEqual(object["available"] as? Bool, true)
     }
 }

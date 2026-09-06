@@ -9,6 +9,8 @@ import Foundation
 /// pct & reset minutes). The firmware polls /now for the {rev} and refetches
 /// /now/text.raw only when the rev moves, exactly like the quote page.
 final class NowPageMonitor {
+    static let layoutRevision = 2
+
     /// Cheap tick: re-rendering is skipped unless the computed rev changed, and
     /// a full render is only ~115 KB of RGB565 over the LAN, so 10s keeps the
     /// quote/weather/Codex rows fresh without hammering the bridge.
@@ -16,7 +18,7 @@ final class NowPageMonitor {
 
     private let quoteMonitor: QuoteMonitor
     private let weatherMonitor: WeatherMonitor
-    private let usage: UsageFetcher
+    private let codexUsageProvider: () -> ProviderUsage
     private let nowProvider: () -> Date
     private let lock = NSLock()
     private var storedData: NowPageData?
@@ -24,11 +26,12 @@ final class NowPageMonitor {
     private var storedText = Data()
     private var timer: Timer?
 
-    init(quoteMonitor: QuoteMonitor, weatherMonitor: WeatherMonitor, usage: UsageFetcher,
+    init(quoteMonitor: QuoteMonitor, weatherMonitor: WeatherMonitor,
+         codexUsageProvider: @escaping () -> ProviderUsage,
          now: @escaping () -> Date = Date.init) {
         self.quoteMonitor = quoteMonitor
         self.weatherMonitor = weatherMonitor
-        self.usage = usage
+        self.codexUsageProvider = codexUsageProvider
         self.nowProvider = now
         refresh()
     }
@@ -41,10 +44,18 @@ final class NowPageMonitor {
     /// the bitmap: `{"rev": N, "available": true}`.
     func jsonData() -> Data {
         withStateLock {
-            guard storedData != nil else { return Data("{\"available\":false}".utf8) }
-            let object: [String: Any] = ["rev": storedRev, "available": true]
-            return (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+            Self.metadataJSON(revision: storedRev, available: storedData != nil)
         }
+    }
+
+    static func metadataJSON(revision: Int, available: Bool) -> Data {
+        guard available else { return Data("{\"available\":false}".utf8) }
+        let object: [String: Any] = [
+            "rev": revision,
+            "layout_rev": layoutRevision,
+            "available": true,
+        ]
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
     }
 
     /// The 240×240 RGB565 frame for the ESP8266 (/now/text.raw).
@@ -61,7 +72,7 @@ final class NowPageMonitor {
     func refresh() {
         let data = NowPageData(quote: quoteMonitor.snapshot,
                                weather: weatherMonitor.snapshot,
-                               codex: usage.codex,
+                               codex: codexUsageProvider(),
                                now: nowProvider())
         let newRev = NowPageLayout.rev(for: data)
         withStateLock {

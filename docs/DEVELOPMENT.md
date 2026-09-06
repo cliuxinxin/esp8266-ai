@@ -309,20 +309,19 @@ Mac 菜单栏的「自动显示设置…」把内容分为两类：事件项只�
 
 ### 名人名言数据与接口
 
-`QuoteMonitor` 每 30 分钟刷新一次，中文源为 `https://v1.hitokoto.cn/`，英文源为 `https://zenquotes.io/`；两种语言交替优先并互为失败回退，拒绝空内容、正文或署名实际排版越界以及最近 20 条重复。缓存位于 `~/Library/Application Support/AIClockBridge/quote-cache.json`，使用版本化 envelope 保存最新中文、最新英文和最近历史；旧版直接编码的单个 `QuoteSnapshot` 会在读取时迁移。当前 schema 为：
+`QuoteMonitor` 每 5 分钟从 `https://v1.hitokoto.cn/` 的文学（`d`）、哲学（`k`）、诗词（`i`）、原创（`e`）、其他（`g`）和影视（`h`）分类刷新一次中文名言，请求端使用 `max_length=45`，并继续拒绝空内容、正文或署名实际排版越界以及最近 20 条重复。缓存位于 `~/Library/Application Support/AIClockBridge/quote-cache.json`，使用版本化 envelope 保存最新中文和最近历史；旧版直接编码的单个中文 `QuoteSnapshot` 会在读取时迁移，旧英文缓存会被忽略并清理。当前 schema 为：
 
 ```json
 {
   "version": 1,
   "latest_chinese": {"text": "…", "author": "…", "language": "zh", "updated_at": 0, "text_rev": 1},
-  "latest_english": {"text": "…", "author": "…", "language": "en", "updated_at": 0, "text_rev": 2},
   "recent_texts": ["…"]
 }
 ```
 
 请求失败时继续使用当前结果；30 分钟后 `/quote` JSON 的 `stale` 变为 `true`。
 
-- `GET /quote`：`text`、`author`、`language`（`zh|en`）、Unix 秒 `updated_at`、`text_rev`、`stale`；尚无可用名言时返回 `{"available":false}`。
+- `GET /quote`：`text`、`author`、`language`（固定为 `zh`）、Unix 秒 `updated_at`、`text_rev`、`stale`；尚无可用名言时返回 `{"available":false}`。
 - `GET /quote/text.raw`：已有可用名言时成功响应一张 240×240 RGB565 大端整屏位图，无头部，恰好 115,200 字节，设备按 480 字节一行流式绘制；尚未获取到任何名言时返回 404。
 - 固定名言模式：`POST /api/display mode=quote`。若 JSON 或整屏位图不可用，固件保留配置的 `quote` 模式但临时显示桌宠，直到内容可取。
 - 串口协议（每帧以换行结束）：bridge → device 支持 `#HELLO`、`#STATUS {json}`、`#NET {json}`、`#STOCK {json}`、`#QUOTE {json}`、`#CMD {json}`；device → bridge 为 `#DEVICE {"name":"aiclock","fw":"x.y.z"}`。`#QUOTE` 只同步元数据，不能证明 HTTP 可达，也不会清除位图失败后的 5/10/20/40/60 秒退避；只有成功的 bridge HTTP 请求或位图下载会确认可达。USB 串口帧持续到达时固件跳过 `/quote` 元数据 HTTP 轮询，避免客户端隔离网络上的 3 秒超时阻塞串口。整屏位图仍从 `/quote/text.raw` 获取，因此纯串口且无可达 HTTP 时不会进入名言页。

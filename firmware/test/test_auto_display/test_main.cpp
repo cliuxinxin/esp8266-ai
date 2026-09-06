@@ -1,6 +1,7 @@
 #include <cassert>
 
 #include "auto_display_logic.h"
+#include "now_page_logic.h"
 #include "quote_transport_logic.h"
 
 void testLegacyBridgeDefaults() {
@@ -467,6 +468,17 @@ void testFixedModeDoesNotRunAutoScheduler() {
   assert(runtime.lastShownOrder == 3);
 }
 
+void testNowLayoutRevisionInvalidatesDisplayedBitmap() {
+  const NowPageRevision current{37, 1};
+  const NowPageRevision same{37, 1};
+  const NowPageRevision newLayout{37, 2};
+
+  assert(!nowPageRevisionChanged(true, current, same));
+  assert(nowPageRevisionChanged(true, current, newLayout));
+  assert(nowPageFrameIsCurrent(true, current, same, false));
+  assert(!nowPageFrameIsCurrent(true, current, newLayout, false));
+}
+
 int main() {
   testLegacyBridgeDefaults();
   testClaudeCanBeDisabled();
@@ -497,5 +509,6 @@ int main() {
   testSerialMetadataPreservesHTTPFailureUntilHTTPConfirmsReachability();
   testUnwiredQuoteMetadataRefreshKeepsItsIntervalPolicy();
   testFixedModeDoesNotRunAutoScheduler();
+  testNowLayoutRevisionInvalidatesDisplayedBitmap();
   return 0;
 }

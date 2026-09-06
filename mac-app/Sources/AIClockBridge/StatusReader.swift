@@ -95,6 +95,21 @@ final class StatusService {
         return m.contains("permission") || m.contains("approve") || m.contains("approval")
     }
 
+    /// Canonical Codex usage snapshot used by both /status and derived screens.
+    /// This keeps all consumers aligned when one source (e.g. usage API) is
+    /// temporarily unavailable but log-derived windows are still available.
+    func codexUsageSnapshot() -> ProviderUsage {
+        let snapshot = snapshot()
+        return ProviderUsage(
+            primaryPct: snapshot.codex.primaryPct,
+            primaryResetMin: snapshot.codex.primaryResetMin,
+            weeklyPct: snapshot.codex.weeklyPct,
+            weeklyResetMin: snapshot.codex.weeklyResetMin,
+            error: nil,
+            fetchedAt: Date(timeIntervalSince1970: TimeInterval(snapshot.ts))
+        )
+    }
+
     /// Called by the /event endpoint. Unknown event names are ignored.
     /// `message` is only sent for Claude's Notification hook.
     func recordEvent(agent: String, event: String, message: String? = nil) {

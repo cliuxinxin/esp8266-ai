@@ -18,6 +18,7 @@
 
 #include "auto_display_logic.h"
 #include "config.h"
+#include "now_page_logic.h"
 #include "quote_transport_logic.h"
 #include "weather_logic.h"
 #include "img/claude_sprite.h"
@@ -210,11 +211,13 @@ int quoteTextDrawnRev = -1;
 // RGB565 frame. The device refetches the bitmap only when the rev moves.
 bool nowValid = false;
 int nowRev = -1;               // last metadata rev (-1 = never received)
+int nowLayoutRev = -1;         // bridge bitmap-layout revision
 unsigned long lastNowPollMs = 0;
 bool nowDirty = false;         // rev changed since last successful draw
 bool nowScreenDrawn = false;   // a full frame is currently on screen
 QuoteBitmapFetchState nowBitmapFetchState;
 int nowDrawnRev = -1;          // rev of the frame currently on screen
+int nowDrawnLayoutRev = -1;    // layout rev of the frame currently on screen
 // CJK names come as Mac-rendered RGB565 strips (GET /stock/names.raw, one
 // 156x16 strip per row) - names_rev says when to re-fetch. -1 = not drawn.
 const int STOCK_NAME_W = 156, STOCK_NAME_H = 16;
@@ -504,9 +507,15 @@ String pctText(float pct) {
   return pct >= 0 ? String((int)pct) + "%" : "-";
 }
 
-// Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
-// over a big font-4 percentage. Values repaint only when their text changes
-// (force = after a full-screen clear), so the 5s poll never flashes them.
+String remainingPctText(float usedPct) {
+  if (usedPct < 0) return "-";
+  int remain = max(0, 100 - constrain((int)usedPct, 0, 100));
+  return String(remain) + "%";
+}
+
+// Quota readout below the sprite. Normally it's two columns for Claude
+// (5h + weekly), but Codex is shown as a single "周" column using only
+// weekly usage so the device and app stay on the same primary usage basis.
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
 String lastQuota5h, lastQuotaWk;
@@ -698,10 +707,8 @@ void drawTinyBoldText(const String &s, int cx, int y, uint16_t color) {
   }
 }
 
-void drawQuotaText(float hourPct, float weekPct, bool force) {
-  // Codex dropped the 5h window (2026-07): the bridge then sends
-  // primary_pct=null, so collapse to a single centered "Wk" column.
-  bool single = hourPct < 0 && weekPct >= 0;
+void drawQuotaText(float hourPct, float weekPct, bool force, bool onlyPrimary = false) {
+  bool single = onlyPrimary ? hourPct < 0 : (hourPct < 0 && weekPct >= 0);
   static int8_t lastSingle = -1;
   if ((int8_t)single != lastSingle) {
     lastSingle = (int8_t)single;
@@ -709,8 +716,8 @@ void drawQuotaText(float hourPct, float weekPct, bool force) {
     tft.fillRect(0, QUOTA_LABEL_Y, 240, QUOTA_VALUE_Y + 22 - QUOTA_LABEL_Y, TFT_BLACK);
   }
   if (single) {
-    if (force) drawSqTextC("Wk", 120, QUOTA_LABEL_Y, 2, 2, TFT_LIGHTGREY);
-    String v = pctText(weekPct);
+    if (force) drawSqTextC("周余", 120, QUOTA_LABEL_Y, 2, 2, TFT_LIGHTGREY);
+    String v = remainingPctText(weekPct);
     if (force || v != lastQuotaWk) {
       lastQuotaWk = v;
       lastQuota5h = "";
@@ -721,7 +728,7 @@ void drawQuotaText(float hourPct, float weekPct, bool force) {
   }
   if (force) {
     drawSqTextC("5h", QUOTA_COL1_X, QUOTA_LABEL_Y, 2, 2, TFT_LIGHTGREY);
-    drawSqTextC("Wk", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, 2, TFT_LIGHTGREY);
+    drawSqTextC("周", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, 2, TFT_LIGHTGREY);
   }
   String v1 = pctText(hourPct), v2 = pctText(weekPct);
   if (force || v1 != lastQuota5h) {
@@ -737,10 +744,9 @@ void drawQuotaText(float hourPct, float weekPct, bool force) {
 }
 
 // ---------- quota-exhausted countdown ----------
-// When the current app's 5h or weekly window is used up, the pet is replaced
-// by a countdown to that window's reset (bridge sends minutes-until-reset).
-// A spent weekly window blocks usage even after the 5h one resets, so the
-// weekly countdown takes priority when both are exhausted.
+// When the active app window is exhausted, show countdown to that window reset.
+// Codex now only uses weekly usage as its primary window; Claude keeps both 5h
+// + weekly behavior.
 
 enum CdType { CD_NONE, CD_5H, CD_WEEK };
 
@@ -761,6 +767,10 @@ int currentWeekResetMin() {
 }
 
 CdType desiredCountdown() {
+  if (currentApp == APP_CODEX) {
+    if (currentWeekPct() >= 99.9f && currentWeekResetMin() >= 0) return CD_WEEK;
+    return CD_NONE;
+  }
   if (currentWeekPct() >= 99.9f && currentWeekResetMin() >= 0) return CD_WEEK;
   if (currentHourPct() >= 99.9f && currentHourResetMin() >= 0) return CD_5H;
   return CD_NONE;
@@ -812,7 +822,7 @@ void drawCountdown(bool force) {
   int x = SCREEN_CX - dotTextWidth(t, P, R) / 2;
   if (force) {
     tft.fillRect(SCREEN_CX - 99, 66, 198, 84, TFT_BLACK);
-    drawDotTextC(showingCd == CD_WEEK ? "Wk RESET IN" : "5h RESET IN", SCREEN_CX, 72, 2, 0,
+    drawDotTextC(showingCd == CD_WEEK ? "周窗口重置中" : "5小时重置中", SCREEN_CX, 72, 2, 0,
                  TFT_LIGHTGREY);
     drawDotText(t, x, VAL_Y, P, R, TFT_ORANGE);
   } else {
@@ -872,10 +882,8 @@ void drawResetDays(bool force) {
   drawDotTextC(t, RESET_CX, RESET_VALUE_Y, pitch, 1, TFT_WHITE);
 }
 
-// Codex's ring percentage: the 5h window when it exists, otherwise the
-// weekly one (Codex removed the 5h limit in 2026-07).
+// Codex's ring percentage uses weekly quota only (unified with bridge primary view).
 float codexRingPct() {
-  if (codexStatus.primaryPct >= 0) return codexStatus.primaryPct;
   return max(codexStatus.weeklyPct, 0.0f);
 }
 
@@ -905,7 +913,7 @@ void drawActiveApp() {
   } else {
     drawSquareRing(codexRingPct(), currentStatusColor());
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
+    drawQuotaText(-1, codexStatus.weeklyPct, true, true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
@@ -924,7 +932,7 @@ void refreshActiveApp() {
     drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
   } else {
     drawSquareRing(codexRingPct(), currentStatusColor());
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
+    drawQuotaText(-1, codexStatus.weeklyPct, false, true);
   }
   drawResetDays(false);
   if (showingCd != CD_NONE) {
@@ -1760,15 +1768,19 @@ bool drawQuoteScreen() {
 
 bool nowCanEnterMode() {
   if (!nowValid || nowRev < 0) return false;
-  if (nowScreenDrawn && nowDrawnRev == nowRev) return true;
+  const NowPageRevision drawn{nowDrawnRev, nowDrawnLayoutRev};
+  const NowPageRevision current{nowRev, nowLayoutRev};
+  if (nowPageFrameIsCurrent(nowScreenDrawn, drawn, current, nowDirty)) return true;
   return WiFi.status() == WL_CONNECTED && bridgeHost.length() > 0 &&
          quoteBitmapFetchAllowed(nowBitmapFetchState, millis());
 }
 
 bool drawNowScreen() {
   if (!nowValid || nowRev < 0) return false;
-  return streamBitmapPage("/now/text.raw", nowBitmapFetchState, nowScreenDrawn,
-                          nowDirty, nowDrawnRev, nowRev);
+  const bool drawn = streamBitmapPage("/now/text.raw", nowBitmapFetchState, nowScreenDrawn,
+                                      nowDirty, nowDrawnRev, nowRev);
+  if (drawn) nowDrawnLayoutRev = nowLayoutRev;
+  return drawn;
 }
 
 void pollQuote() {
@@ -1803,9 +1815,15 @@ void pollNow() {
     JsonDocument doc;
     if (!deserializeJson(doc, http.getString()) && doc["rev"].is<int>()) {
       const int rev = doc["rev"].as<int>();
-      const bool changed = !nowValid || rev != nowRev;
+      // Old bridge versions did not publish layout_rev; treat those frames as
+      // layout 1 so upgrading either side invalidates the cached bitmap once.
+      const int layoutRev = doc["layout_rev"].is<int>() ? doc["layout_rev"].as<int>() : 1;
+      const NowPageRevision current{nowRev, nowLayoutRev};
+      const NowPageRevision incoming{rev, layoutRev};
+      const bool changed = nowPageRevisionChanged(nowValid, current, incoming);
       nowValid = true;
       nowRev = rev;
+      nowLayoutRev = layoutRev;
       nowDirty = nowDirty || changed;
     }
   } else {
@@ -2224,9 +2242,7 @@ void handleRoot() {
           formatTokens(claudeStatus.tokensToday) + " tok</td></tr>";
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
           formatTokens(codexStatus.tokensToday) + " tok, " +
-          (codexStatus.primaryPct >= 0 ? "5h " + String(codexStatus.primaryPct, 0) + "%"
-           : codexStatus.weeklyPct >= 0 ? "Wk " + String(codexStatus.weeklyPct, 0) + "%"
-                                        : "5h ?") + "</td></tr>";
+          (codexStatus.weeklyPct >= 0 ? "周 " + String(codexStatus.weeklyPct, 0) + "%" : "周 ?") + "</td></tr>";
   html += "</table>";
 
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "
@@ -2848,7 +2864,9 @@ void loop() {
       scheduledModeBecameVisible(MODE_QUOTE);
     }
   } else if (eff == MODE_NOW) {
-    if ((!nowScreenDrawn || nowDirty || nowDrawnRev != nowRev) && !drawNowScreen()) {
+    const NowPageRevision drawn{nowDrawnRev, nowDrawnLayoutRev};
+    const NowPageRevision current{nowRev, nowLayoutRev};
+    if (!nowPageFrameIsCurrent(nowScreenDrawn, drawn, current, nowDirty) && !drawNowScreen()) {
       // effectiveMode() will leave now while this revision is backed off.
     } else {
       scheduledModeBecameVisible(MODE_NOW);

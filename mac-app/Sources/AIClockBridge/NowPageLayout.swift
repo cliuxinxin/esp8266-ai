@@ -22,7 +22,7 @@ struct NowPageLayout {
 
     // Page geometry, top-left origin.
     private static let headerLogoRect = CGRect(x: 8, y: 8, width: 64, height: 16)
-    private static let headerDateRect = CGRect(x: 156, y: 8, width: 76, height: 16)
+    private static let headerDateRect = CGRect(x: 144, y: 8, width: 88, height: 16)
     private static let bodyRect = CGRect(x: 16, y: 30, width: 208, height: 120)
     private static let authorRect = CGRect(x: 16, y: 154, width: 208, height: 16)
     private static let dividerRect = CGRect(x: 16, y: 172, width: 208, height: 1)
@@ -76,7 +76,7 @@ struct NowPageLayout {
 
         let body = bodyRun(text: text, language: language)
         let authorFit = authorRun(author: author)
-        let pct = data.codex.weeklyPct ?? data.codex.primaryPct
+        let pct = data.codex.weeklyPct
         let full = (pct ?? 0) >= 100
         let barColor: NSColor = pct.map {
             $0 >= 100 ? NSColor.systemRed
@@ -84,7 +84,14 @@ struct NowPageLayout {
                 : NSColor.systemGreen
         } ?? NSColor.systemGray
         let resetColor: NSColor = full ? NSColor.systemRed : NSColor(white: 0.6, alpha: 1)
-        let pctText = pct.map { "\(Int($0))%" } ?? "--"
+        let pctText = pct.map {
+            let used = min(100, max(0, Int($0)))
+            let remain = 100 - used
+            return "余\(remain)%"
+        } ?? "暂无数据"
+        let pctRect = CGRect(x: 132, y: 214, width: 92, height: 16)
+        let pctColor = pct == nil ? NSColor(white: 0.6, alpha: 1) : NSColor.white
+        let pctWeight: NSFont.Weight = pct == nil ? .regular : .semibold
 
         return NowPageLayout(
             headerLogo: headerRun("NOW", rect: headerLogoRect, color: NSColor.systemTeal),
@@ -103,8 +110,9 @@ struct NowPageLayout {
             codexBarRect: CGRect(x: 58, y: 219, width: 70, height: 4),
             codexBarColor: barColor,
             codexFillRatio: CGFloat(min(1, max(0, (pct ?? 0) / 100))),
-            codexPct: infoRun(pctText, rect: CGRect(x: 132, y: 214, width: 36, height: 16),
-                              size: Typography.codexNumSize, color: .white, weight: .semibold, mono: true),
+            codexPct: infoRun(pctText, rect: pctRect,
+                              size: Typography.codexNumSize, color: pctColor,
+                              weight: pctWeight, mono: pct != nil),
             codexReset: infoRun(codexResetText(data.codex), rect: CGRect(x: 168, y: 215, width: 56, height: 14),
                                 size: Typography.codexLabelSize, color: resetColor, mono: true, right: true),
             fits: body.fits && authorFit.fits
@@ -152,14 +160,23 @@ struct NowPageLayout {
     private static func bodyRun(text: String, language: String) -> (run: QuoteTextRun, fits: Bool) {
         let range = Typography.bodySizes[language] ?? Typography.bodySizes["zh"]!
         let chinese = language == "zh"
-        let display = "“\(text)”"
+        let display = bodyDisplayText(text, chinese: chinese)
         var size = range.upperBound
         var fitted: (size: CGFloat, height: CGFloat)?
 
         while size >= range.lowerBound - 0.001 {
             if let height = measuredHeight(display, size: size, chinese: chinese), height <= bodyRect.height {
-                fitted = (size, height)
-                break
+                let attributes = bodyAttributes(size: size, chinese: chinese, centered: false)
+                let expectedLines = display.reduce(into: 1) { count, character in
+                    if character == "\n" { count += 1 }
+                }
+                let respectsClauseBreak = !display.contains("\n") ||
+                    lineCount(display, attributes: attributes, width: bodyRect.width) == expectedLines
+                if respectsClauseBreak &&
+                    (!chinese || hasReadableLines(display, attributes: attributes, width: bodyRect.width)) {
+                    fitted = (size, height)
+                    break
+                }
             }
             size -= Typography.step
         }
@@ -177,6 +194,29 @@ struct NowPageLayout {
         return (QuoteTextRun(text: display, rect: rect, attributes: attributes), fitted != nil)
     }
 
+    private static func bodyDisplayText(_ text: String, chinese: Bool) -> String {
+        guard chinese else { return "“\(text)”" }
+        let preferredBreaks = CharacterSet(charactersIn: "，；！？")
+        var candidates: [(index: String.Index, balance: Int)] = []
+        for index in text.indices where String(text[index]).rangeOfCharacter(from: preferredBreaks) != nil {
+            let next = text.index(after: index)
+            let leading = text.distance(from: text.startIndex, to: next)
+            let trailing = text.distance(from: next, to: text.endIndex)
+            if leading >= 4 && trailing >= 4 {
+                candidates.append((next, abs(leading - trailing)))
+            }
+        }
+        guard let split = candidates.min(by: { $0.balance < $1.balance })?.index else {
+            return "“\(text)”"
+        }
+        let preferred = "“\(text[..<split])\n\(text[split...])”"
+        let minimumSize = Typography.bodySizes["zh"]!.lowerBound
+        let attributes = bodyAttributes(size: minimumSize, chinese: true, centered: false)
+        return lineCount(preferred, attributes: attributes, width: bodyRect.width) == 2
+            ? preferred
+            : "“\(text)”"
+    }
+
     // MARK: - measurement
 
     private static func measuredHeight(_ text: String, size: CGFloat, chinese: Bool) -> CGFloat? {
@@ -190,11 +230,27 @@ struct NowPageLayout {
     }
 
     private static func lineCount(_ text: String, attributes: [NSAttributedString.Key: Any], width: CGFloat) -> Int {
+        lineRanges(text, attributes: attributes, width: width).count
+    }
+
+    private static func hasReadableLines(_ text: String, attributes: [NSAttributedString.Key: Any],
+                                         width: CGFloat) -> Bool {
+        let punctuation = CharacterSet(charactersIn: "，。！？、；：“”‘’（）【】《》「」『』,.!?;:")
+        let ignored = punctuation.union(.whitespacesAndNewlines)
+        let source = text as NSString
+        return lineRanges(text, attributes: attributes, width: width).allSatisfy { range in
+            !source.substring(with: NSRange(location: range.location, length: range.length))
+                .trimmingCharacters(in: ignored).isEmpty
+        }
+    }
+
+    private static func lineRanges(_ text: String, attributes: [NSAttributedString.Key: Any],
+                                   width: CGFloat) -> [CFRange] {
         let attributed = NSAttributedString(string: text, attributes: attributes)
         let framesetter = CTFramesetterCreateWithAttributedString(attributed)
         let path = CGPath(rect: CGRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude), transform: nil)
         let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), path, nil)
-        return CFArrayGetCount(CTFrameGetLines(frame))
+        return (CTFrameGetLines(frame) as NSArray).map { CTLineGetStringRange($0 as! CTLine) }
     }
 
     // MARK: - attributes
@@ -228,7 +284,7 @@ struct NowPageLayout {
     static func weatherLine1Text(_ weather: WeatherSnapshot?) -> String {
         guard let weather else { return "天气暂无数据" }
         let temp = weather.temperature.map { "\(Int($0.rounded()))°C" } ?? "--"
-        return "\(weatherIcon(weather.weatherCode)) \(weather.city) \(temp) \(WeatherMonitor.conditionText(for: weather.weatherCode))"
+        return "\(weatherIcon(weather.weatherCode)) \(weather.city) · \(temp) · \(WeatherMonitor.conditionText(for: weather.weatherCode))"
     }
 
     static func weatherLine2Text(_ weather: WeatherSnapshot?) -> String {
@@ -242,7 +298,7 @@ struct NowPageLayout {
     }
 
     static func codexResetText(_ usage: ProviderUsage) -> String {
-        guard let minutes = usage.weeklyResetMin ?? usage.primaryResetMin, minutes >= 0 else { return "--" }
+        guard let minutes = usage.weeklyResetMin, minutes >= 0 else { return "" }
         if minutes < 60 { return "\(minutes)分" }
         let hours = minutes / 60
         if hours < 24 {
@@ -257,7 +313,7 @@ struct NowPageLayout {
     static func headerDateText(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "MM-dd HH:mm"
+        formatter.dateFormat = "MM.dd · HH:mm"
         return formatter.string(from: date)
     }
 
@@ -283,9 +339,9 @@ struct NowPageLayout {
         var r = 0
         if let quote = data.quote { r = r &* 31 &+ quote.textRev }
         if let weather = data.weather { r = r &* 31 &+ weather.textRev }
-        let pct = Int(((data.codex.weeklyPct ?? data.codex.primaryPct ?? -1) * 100).rounded())
+        let pct = Int((data.codex.weeklyPct ?? -1).rounded())
         r = r &* 31 &+ pct
-        r = r &* 31 &+ (data.codex.weeklyResetMin ?? data.codex.primaryResetMin ?? -1)
+        r = r &* 31 &+ (data.codex.weeklyResetMin ?? -1)
         return r
     }
 
