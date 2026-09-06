@@ -217,7 +217,7 @@ final class NowPageLayoutTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: json) as? [String: Any])
 
         XCTAssertEqual(object["rev"] as? Int, 37)
-        XCTAssertEqual(object["layout_rev"] as? Int, 2)
+        XCTAssertEqual(object["layout_rev"] as? Int, 3)
         XCTAssertEqual(object["available"] as? Bool, true)
     }
 }

@@ -18,13 +18,14 @@ struct NowPageData {
 /// Same conventions as QuotePageLayout — 240×240, top-left origin, one shared
 /// geometry so the device bitmap and the menu-bar mirror render identically.
 struct NowPageLayout {
+    static let layoutRevision = 3
     static let pageSize = 240
 
     // Page geometry, top-left origin.
     private static let headerLogoRect = CGRect(x: 8, y: 8, width: 64, height: 16)
     private static let headerDateRect = CGRect(x: 144, y: 8, width: 88, height: 16)
-    private static let bodyRect = CGRect(x: 16, y: 30, width: 208, height: 120)
-    private static let authorRect = CGRect(x: 16, y: 154, width: 208, height: 16)
+    private static let bodyRect = CGRect(x: 14, y: 30, width: 212, height: 122)
+    private static let authorRect = CGRect(x: 14, y: 156, width: 212, height: 16)
     private static let dividerRect = CGRect(x: 16, y: 172, width: 208, height: 1)
     private static let weather1Rect = CGRect(x: 16, y: 178, width: 208, height: 18)
     private static let weather2Rect = CGRect(x: 16, y: 197, width: 208, height: 14)
@@ -32,7 +33,7 @@ struct NowPageLayout {
 
     private enum Typography {
         static let headerSize: CGFloat = 10
-        static let bodySizes: [String: ClosedRange<CGFloat>] = ["zh": 14...26, "en": 12...24]
+        static let bodySizes: [String: ClosedRange<CGFloat>] = ["zh": 14...30, "en": 12...28]
         static let authorSizes: [CGFloat] = [12, 11, 10]
         static let characterLimits: [String: Int] = ["zh": 80, "en": 180]
         static let step: CGFloat = 0.5
@@ -337,6 +338,7 @@ struct NowPageLayout {
     /// refetches the composite bitmap only when something actually changed.
     static func rev(for data: NowPageData) -> Int {
         var r = 0
+        r = r &* 31 &+ layoutRevision
         if let quote = data.quote { r = r &* 31 &+ quote.textRev }
         if let weather = data.weather { r = r &* 31 &+ weather.textRev }
         let pct = Int((data.codex.weeklyPct ?? -1).rounded())

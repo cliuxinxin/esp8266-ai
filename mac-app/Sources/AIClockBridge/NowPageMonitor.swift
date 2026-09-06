@@ -9,7 +9,7 @@ import Foundation
 /// pct & reset minutes). The firmware polls /now for the {rev} and refetches
 /// /now/text.raw only when the rev moves, exactly like the quote page.
 final class NowPageMonitor {
-    static let layoutRevision = 2
+    static let layoutRevision = NowPageLayout.layoutRevision
 
     /// Cheap tick: re-rendering is skipped unless the computed rev changed, and
     /// a full render is only ~115 KB of RGB565 over the LAN, so 10s keeps the
