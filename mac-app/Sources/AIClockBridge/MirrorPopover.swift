@@ -822,10 +822,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             let codexMainPct = snap.codex.weeklyPct
             mirror.ringPct = codexMainPct ?? 0
             if let weekly = snap.codex.weeklyPct {
-                mirror.line1 = "周剩余 " + Self.pctText(Self.remainingPercent(weekly))
+                mirror.line1 = Self.pctText(Self.remainingPercent(weekly))
                 mirror.line2 = ""
             } else {
-                mirror.line1 = "周剩余 " + Self.pctText(nil)
+                mirror.line1 = Self.pctText(nil)
                 mirror.line2 = ""
             }
             mirror.needsInput = snap.codex.needsInput

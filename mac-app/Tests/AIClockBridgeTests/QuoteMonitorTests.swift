@@ -39,6 +39,12 @@ final class QuoteMonitorTests: XCTestCase {
         XCTAssertEqual(try QuoteMonitor.parseHitokoto(zh).author, "孔子")
     }
 
+    func testRejectsEnglishQuote() throws {
+        let english = Data(#"{"hitokoto":"Stay hungry, stay foolish.","from":"Motivational","from_who":"Steve Jobs"}"#.utf8)
+
+        XCTAssertThrowsError(try QuoteMonitor.parseHitokoto(english))
+    }
+
     func testAuthorFallsBackToSourceThenAnonymous() throws {
         let sourceOnly = Data(#"{"hitokoto":"山高水长","from":"古语","from_who":null}"#.utf8)
         let anonymousChinese = Data(#"{"hitokoto":"山高水长","from":null,"from_who":null}"#.utf8)

@@ -92,9 +92,9 @@ final class NowPageLayoutTests: XCTestCase {
         let base = quote(text: "生活不止眼前的苟且", author: "高晓松", language: "zh")
         let both = codex(weeklyPct: 42, primaryPct: 10)
         let pct = NowPageLayout.make(for: data(quote: base, codex: both))?.codexPct.text ?? ""
-        XCTAssertEqual(pct, "余58%")
+        XCTAssertEqual(pct, "58%")
         let weeklyOnly = codex(weeklyPct: 88)
-        XCTAssertEqual(NowPageLayout.make(for: data(quote: base, codex: weeklyOnly))?.codexPct.text, "余12%")
+        XCTAssertEqual(NowPageLayout.make(for: data(quote: base, codex: weeklyOnly))?.codexPct.text, "12%")
     }
 
     // MARK: - header

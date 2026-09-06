@@ -147,7 +147,9 @@ final class QuoteMonitor {
     static func parseHitokoto(_ data: Data) throws -> QuoteSnapshot {
         let response = try JSONDecoder().decode(HitokotoResponse.self, from: data)
         let author = normalized(response.fromWho) ?? normalized(response.source) ?? "佚名"
-        return QuoteSnapshot(text: normalizedText(response.text), author: author, language: "zh",
+        let text = normalizedText(response.text)
+        guard Self.containsChinese(text) else { throw QuoteMonitorError.noChinese }
+        return QuoteSnapshot(text: text, author: author, language: "zh",
                              updatedAt: Date(), textRev: 0)
     }
 
@@ -265,6 +267,16 @@ final class QuoteMonitor {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func containsChinese(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            let v = scalar.value
+            return (0x4E00...0x9FFF).contains(v)
+                || (0x3400...0x4DBF).contains(v)
+                || (0x20000...0x2A6DF).contains(v)
+                || (0x2A700...0x2B73F).contains(v)
+        }
+    }
+
     private static func renderQuotePage(_ quote: QuoteSnapshot) -> Data {
         let size = QuotePageLayout.pageSize
         guard let layout = QuotePageLayout.make(for: quote),
@@ -334,6 +346,7 @@ private enum QuoteMonitorError: Error {
     case emptyResponse
     case notDisplayable
     case duplicate
+    case noChinese
 }
 
 private struct HitokotoResponse: Decodable {

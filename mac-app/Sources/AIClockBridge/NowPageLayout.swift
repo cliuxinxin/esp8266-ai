@@ -87,7 +87,7 @@ struct NowPageLayout {
         let pctText = pct.map {
             let used = min(100, max(0, Int($0)))
             let remain = 100 - used
-            return "余\(remain)%"
+            return "\(remain)%"
         } ?? "暂无数据"
         let pctRect = CGRect(x: 132, y: 214, width: 92, height: 16)
         let pctColor = pct == nil ? NSColor(white: 0.6, alpha: 1) : NSColor.white
